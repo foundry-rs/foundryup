@@ -1,14 +1,11 @@
 # foundryup: the foundry toolchain installer
 
-*foundryup* installs [the foundry toolchain][https://github.com/foundry-rs/foundry] from the official
+*foundryup* installs [the Foundry toolchain](https://github.com/foundry-rs/foundry) from the official
 release channels.
-
-[rustlang]: https://www.rust-lang.org
 
 ## Documentation
 
-See [**The foundry book**](https://book.getfoundry.sh/) for
-documentation on installing and using *foundryup*.
+See [**The Foundry Book**](https://book.getfoundry.sh/) for documentation on installing and using *foundryup*.
 
 ## Getting help
 
