@@ -1,7 +1,7 @@
 use snapbox::{cmd::Command, str};
 
 fn foundryup() -> Command {
-    Command::new(snapbox::cmd::cargo_bin!("foundryup"))
+    Command::new(snapbox::cmd::cargo_bin!("foundryup")).env("NO_COLOR", "1")
 }
 
 #[test]
@@ -48,7 +48,7 @@ Options:
 
   -n, --network <NETWORK>
           Install binaries for a specific network (e.g., tempo)
-          
+
           [possible values: tempo]
 
   -f, --force
@@ -62,7 +62,7 @@ Options:
 
       --completions <SHELL>
           Generate shell completions
-          
+
           [possible values: bash, elvish, fish, powershell, zsh]
 
   -h, --help
@@ -116,7 +116,7 @@ fn use_nonexistent_version() {
         .failure()
         .stderr_eq(str![[r#"
 ...
-[..]not installed
+[..]version nonexistent-version not installed[..]
 ...
 "#]]);
 }

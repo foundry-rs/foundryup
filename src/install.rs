@@ -596,7 +596,7 @@ fn normalize_version(version: &str) -> String {
 }
 
 fn version_to_tag(version: &str) -> String {
-    version.to_string()
+    version.trim_start_matches('v').to_string()
 }
 
 fn bin_name(name: &str) -> String {
