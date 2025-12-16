@@ -1,0 +1,2 @@
+[tests/it/**/*.rs]
+trim_trailing_whitespace = false

@@ -1,7 +1,17 @@
 use snapbox::{cmd::Command, str};
+use std::path::Path;
 
 fn foundryup() -> Command {
     Command::new(snapbox::cmd::cargo_bin!("foundryup")).env("NO_COLOR", "1")
+}
+
+fn run_forge(foundry_dir: &Path) {
+    Command::new(foundry_dir.join("bin/forge")).arg("--version").assert().success().stdout_eq(
+        str![[r#"
+forge [..]
+...
+"#]],
+    );
 }
 
 #[test]
@@ -13,7 +23,7 @@ Update or revert to a specific Foundry version with ease.
 
 By default, the latest stable version is installed from built binaries.
 
-Usage: foundryup [OPTIONS]
+Usage: foundryup[EXE] [OPTIONS]
 
 Options:
   -U, --update
@@ -152,6 +162,8 @@ fn install_stable() {
     assert!(foundry_dir.join("bin/cast").exists());
     assert!(foundry_dir.join("bin/anvil").exists());
     assert!(foundry_dir.join("bin/chisel").exists());
+
+    run_forge(&foundry_dir);
 }
 
 #[test]
@@ -172,6 +184,8 @@ fn install_nightly() {
 
     assert!(foundry_dir.join("bin/forge").exists());
     assert!(foundry_dir.join("bin/cast").exists());
+
+    run_forge(&foundry_dir);
 }
 
 #[test]
