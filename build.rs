@@ -1,9 +1,17 @@
-use vergen::{Config, ShaKind};
-
 fn main() {
-    let mut config = Config::default();
-    // Change the SHA output to the short variant
-    *config.git_mut().sha_kind_mut() = ShaKind::Short;
-    vergen::vergen(config)
-        .unwrap_or_else(|e| panic!("vergen crate failed to generate version information! {e}"));
+    if let Err(e) = vergen_git2::Emitter::default()
+        .add_instructions(
+            &vergen_git2::BuildBuilder::default().build_timestamp(true).build().unwrap(),
+        )
+        .unwrap()
+        .add_instructions(&vergen_git2::RustcBuilder::default().semver(true).build().unwrap())
+        .unwrap()
+        .add_instructions(
+            &vergen_git2::Git2Builder::default().sha(true).dirty(true).build().unwrap(),
+        )
+        .unwrap()
+        .emit()
+    {
+        println!("cargo:warning=vergen failed: {e}");
+    }
 }
