@@ -1,19 +1,25 @@
 use snapbox::{cmd::Command, str};
-use std::path::Path;
+use std::{env::consts::EXE_SUFFIX, path::Path};
 
 const BINS: &[&str] = &["forge", "cast", "anvil", "chisel"];
+const TEMPO_BINS: &[&str] = &["forge", "cast"];
 
 fn foundryup() -> Command {
     Command::new(snapbox::cmd::cargo_bin!("foundryup")).env("NO_COLOR", "1")
 }
 
-fn run_forge(foundry_dir: &Path) {
-    Command::new(foundry_dir.join("bin/forge")).arg("--version").assert().success().stdout_eq(
-        str![[r#"
+fn run_forge_test(foundry_dir: &Path, temp_dir: &Path) {
+    let forge = foundry_dir.join(format!("bin/forge{EXE_SUFFIX}"));
+
+    Command::new(&forge).arg("--version").assert().success().stdout_eq(str![[r#"
 forge [..]
 ...
-"#]],
-    );
+"#]]);
+
+    Command::new(&forge).args(["init", "test-project"]).current_dir(temp_dir).assert().success();
+    let project_dir = temp_dir.join("test-project");
+
+    Command::new(&forge).arg("test").current_dir(&project_dir).assert().success();
 }
 
 #[test]
@@ -160,11 +166,11 @@ fn test_install(version: &str) {
 "#]]);
 
     for &bin in BINS {
-        let name = format!("{bin}{}", std::env::consts::EXE_EXTENSION);
+        let name = format!("{bin}{EXE_SUFFIX}");
         assert!(foundry_dir.join("bin").join(&name).exists(), "{name} does not exist");
     }
 
-    run_forge(&foundry_dir);
+    run_forge_test(&foundry_dir, temp_dir.path());
 
     foundryup().env("FOUNDRY_DIR", &foundry_dir).arg("--list").assert().success().stderr_eq(str![
         [r#"
@@ -193,15 +199,6 @@ fn install_v1_5_0() {
 #[test]
 fn install_1_5_0() {
     test_install("1.5.0");
-}
-
-#[test]
-fn list_after_install() {
-    let temp_dir =
-        tempfile::Builder::new().prefix("foundryup-test-list-after-install").tempdir().unwrap();
-    let foundry_dir = temp_dir.path().join(".foundry");
-
-    foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["-i", "stable"]).assert().success();
 }
 
 #[test]
@@ -242,4 +239,31 @@ fn reinstall_uses_cache() {
 [..]done!
 ...
 "#]]);
+}
+
+#[test]
+fn install_tempo_nightly() {
+    let temp_dir =
+        tempfile::Builder::new().prefix("foundryup-test-tempo-nightly").tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+
+    foundryup()
+        .env("FOUNDRY_DIR", &foundry_dir)
+        .args(["--network", "tempo"])
+        .assert()
+        .success()
+        .stderr_eq(str![[r#"
+...
+[..]installing tempo-foundry[..]
+...
+[..]done!
+...
+"#]]);
+
+    for &bin in TEMPO_BINS {
+        let name = format!("{bin}{}", std::env::consts::EXE_EXTENSION);
+        assert!(foundry_dir.join("bin").join(&name).exists(), "{name} does not exist");
+    }
+
+    run_forge_test(&foundry_dir, temp_dir.path());
 }

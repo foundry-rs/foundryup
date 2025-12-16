@@ -14,12 +14,7 @@ pub(crate) const LONG_VERSION: &str = concat!(
     ")"
 );
 
-pub(crate) const FOUNDRY_REPO: &str = "foundry-rs/foundry";
 pub(crate) const FOUNDRYUP_REPO: &str = "foundry-rs/foundryup";
-pub(crate) const TEMPO_REPO: &str = "tempoxyz/tempo-foundry";
-
-pub(crate) const BINS: &[&str] = &["forge", "cast", "anvil", "chisel"];
-pub(crate) const TEMPO_BINS: &[&str] = &["forge", "cast"];
 
 #[derive(Debug)]
 pub(crate) struct Config {
@@ -27,10 +22,11 @@ pub(crate) struct Config {
     pub versions_dir: PathBuf,
     pub bin_dir: PathBuf,
     pub man_dir: PathBuf,
+    pub network: NetworkConfig,
 }
 
 impl Config {
-    pub(crate) fn new() -> Result<Self> {
+    pub(crate) fn new(network: Option<Network>) -> Result<Self> {
         let base_dir =
             std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(home::home_dir);
 
@@ -43,8 +39,9 @@ impl Config {
         let versions_dir = foundry_dir.join("versions");
         let bin_dir = foundry_dir.join("bin");
         let man_dir = foundry_dir.join("share/man/man1");
+        let network = NetworkConfig::for_network(network);
 
-        Ok(Self { foundry_dir, versions_dir, bin_dir, man_dir })
+        Ok(Self { foundry_dir, versions_dir, bin_dir, man_dir, network })
     }
 
     pub(crate) fn ensure_dirs(&self) -> Result<()> {
@@ -67,21 +64,44 @@ impl Config {
         self.bin_dir.join(name)
     }
 
-    pub(crate) fn bins(&self, network: Option<Network>) -> &'static [&'static str] {
-        match network {
-            Some(Network::Tempo) => TEMPO_BINS,
-            None => BINS,
-        }
-    }
-
-    pub(crate) fn repo(&self, network: Option<Network>) -> &'static str {
-        match network {
-            Some(Network::Tempo) => TEMPO_REPO,
-            None => FOUNDRY_REPO,
-        }
-    }
-
     pub(crate) fn repo_dir(&self, repo: &str) -> PathBuf {
         self.foundry_dir.join(repo)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NetworkConfig {
+    pub repo: &'static str,
+    pub bins: &'static [&'static str],
+    pub archive_prefix: &'static str,
+    pub default_version: &'static str,
+    pub display_name: &'static str,
+    pub has_attestation: bool,
+}
+
+impl NetworkConfig {
+    const FOUNDRY: Self = Self {
+        repo: "foundry-rs/foundry",
+        bins: &["forge", "cast", "anvil", "chisel"],
+        archive_prefix: "foundry",
+        default_version: "stable",
+        display_name: "foundry",
+        has_attestation: true,
+    };
+
+    const TEMPO: Self = Self {
+        repo: "tempoxyz/tempo-foundry",
+        bins: &["forge", "cast"],
+        archive_prefix: "foundry",
+        default_version: "nightly",
+        display_name: "tempo-foundry",
+        has_attestation: false,
+    };
+
+    fn for_network(network: Option<Network>) -> Self {
+        match network {
+            Some(Network::Tempo) => Self::TEMPO,
+            None => Self::FOUNDRY,
+        }
     }
 }

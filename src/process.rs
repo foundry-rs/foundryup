@@ -3,7 +3,7 @@ use eyre::Result;
 use sysinfo::System;
 
 pub(crate) fn check_bins_in_use(config: &Config) -> Result<()> {
-    let bins = config.bins(None);
+    let bins = config.network.bins;
     let mut sys = System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 

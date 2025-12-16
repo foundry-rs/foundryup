@@ -43,13 +43,13 @@ fn main() -> Result<()> {
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    let config = Arc::new(Config::new()?);
-
-    // Handle --completions first (no banner)
+    // Handle --completions first (no banner, no config needed)
     if let Some(shell) = cli.completions {
         cli::print_completions(shell);
         return Ok(());
     }
+
+    let config = Arc::new(Config::new(cli.network)?);
 
     if cli.update {
         return self_update::run(&config).await;

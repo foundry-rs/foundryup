@@ -1,5 +1,5 @@
 use crate::{
-    cli::{Cli, Network},
+    cli::Cli,
     config::Config,
     download::{Downloader, compute_sha256, extract_tar_gz, extract_zip},
     platform::{Platform, Target},
@@ -16,74 +16,48 @@ pub(crate) async fn run(config: &Config, args: &Cli) -> Result<()> {
         return install_from_local(config, local_path, args).await;
     }
 
-    let network = args.network;
-    let repo = args.repo.as_deref().unwrap_or_else(|| config.repo(network));
+    let repo = args.repo.as_deref().unwrap_or(config.network.repo);
 
     let should_build = args.branch.is_some() || args.pr.is_some() || args.commit.is_some();
-    let is_foundry_repo = repo == crate::config::FOUNDRY_REPO;
-    let is_tempo = network == Some(Network::Tempo);
+    let is_default_repo = repo == config.network.repo;
 
-    if is_foundry_repo && !should_build {
+    if is_default_repo && !should_build {
         install_prebuilt(config, args).await
-    } else if is_tempo && !should_build {
-        install_tempo_prebuilt(config, args).await
     } else {
         install_from_source(config, repo, args).await
     }
 }
 
 async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
-    let version = normalize_version(args.version.as_deref().unwrap_or("stable"));
-    let tag = version_to_tag(&version);
+    let (version, tag) =
+        normalize_version(args.version.as_deref().unwrap_or(config.network.default_version));
 
-    say(&format!("installing foundry (version {version}, tag {tag})"));
+    say(&format!("installing {} (version {version}, tag {tag})", config.network.display_name));
 
     let target = Target::detect(args.platform.as_deref(), args.arch.as_deref())?;
     let downloader = Downloader::new()?;
 
     let release_url =
-        format!("https://github.com/{}/releases/download/{tag}/", crate::config::FOUNDRY_REPO);
+        format!("https://github.com/{}/releases/download/{tag}/", config.network.repo);
 
-    let bins = config.bins(args.network);
-
-    let hashes = if !args.force {
-        fetch_and_verify_attestation(config, &downloader, &release_url, &version, &target, bins)
-            .await?
-    } else {
+    let hashes = if config.network.has_attestation && !args.force {
+        fetch_and_verify_attestation(config, &downloader, &release_url, &version, &target).await?
+    } else if args.force {
         say("skipped SHA verification due to --force flag");
+        None
+    } else {
         None
     };
 
-    download_and_extract(config, &downloader, &release_url, &version, &tag, &target).await?;
+    download_and_extract(config, &downloader, &release_url, &version, tag, &target).await?;
 
     if let Some(ref hashes) = hashes {
-        verify_installed_binaries(config, &tag, bins, hashes)?;
+        verify_installed_binaries(config, tag, hashes)?;
     }
 
     download_manpages(config, &downloader, &release_url, &version).await;
 
-    use_version(config, &tag)?;
-    say("done!");
-
-    Ok(())
-}
-
-async fn install_tempo_prebuilt(config: &Config, args: &Cli) -> Result<()> {
-    let version = args.version.as_deref().unwrap_or("nightly");
-    let tag = version.to_string();
-
-    say(&format!("installing tempo-foundry (version {version}, tag {tag})"));
-
-    let target = Target::detect(args.platform.as_deref(), args.arch.as_deref())?;
-    let downloader = Downloader::new()?;
-
-    let release_url =
-        format!("https://github.com/{}/releases/download/{tag}/", crate::config::TEMPO_REPO);
-
-    download_and_extract_tempo(config, &downloader, &release_url, &target, &tag).await?;
-    download_manpages(config, &downloader, &release_url, "nightly").await;
-
-    use_version(config, &tag)?;
+    use_version(config, tag)?;
     say("done!");
 
     Ok(())
@@ -109,8 +83,7 @@ async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> R
         bail!("cargo build failed");
     }
 
-    let bins = config.bins(args.network);
-    for bin in bins {
+    for bin in config.network.bins {
         let src = local_path.join("target/release").join(bin_name(bin));
         let dest = config.bin_path(bin);
 
@@ -210,8 +183,7 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
     let version_dir = config.version_dir(&version);
     fs::create_dir_all(&version_dir)?;
 
-    let bins = config.bins(args.network);
-    for bin in bins {
+    for bin in config.network.bins {
         let src = repo_path.join("target/release").join(bin_name(bin));
         if src.exists() {
             fs::rename(&src, version_dir.join(bin_name(bin)))?;
@@ -230,8 +202,8 @@ async fn fetch_and_verify_attestation(
     release_url: &str,
     version: &str,
     target: &Target,
-    bins: &[&str],
 ) -> Result<Option<HashMap<String, String>>> {
+    let bins = config.network.bins;
     say(&format!("checking if {} for {version} version are already installed", bins.join(", ")));
 
     let attestation_url = format!(
@@ -264,8 +236,7 @@ async fn fetch_and_verify_attestation(
 
     let hashes = parse_attestation_payload(&artifact_json)?;
 
-    let tag = version_to_tag(version);
-    let version_dir = config.version_dir(&tag);
+    let version_dir = config.version_dir(version);
 
     if version_dir.exists() {
         let mut all_match = true;
@@ -290,8 +261,8 @@ async fn fetch_and_verify_attestation(
         }
 
         if all_match {
-            say(&format!("version {tag} already installed and verified, activating..."));
-            use_version(config, &tag)?;
+            say(&format!("version {version} already installed and verified, activating..."));
+            use_version(config, version)?;
             say("done!");
             std::process::exit(0);
         }
@@ -335,53 +306,8 @@ async fn download_and_extract(
     target: &Target,
 ) -> Result<()> {
     let archive_name = format!(
-        "foundry_{version}_{platform}_{arch}.{ext}",
-        platform = target.platform.as_str(),
-        arch = target.arch.as_str(),
-        ext = target.platform.archive_ext()
-    );
-
-    let archive_url = format!("{release_url}{archive_name}");
-    say(&format!("downloading {archive_name}"));
-
-    let temp_dir = tempfile::tempdir()?;
-    let archive_path = temp_dir.path().join(&archive_name);
-
-    downloader.download_to_file(&archive_url, &archive_path).await?;
-
-    let version_dir = config.version_dir(tag);
-    fs::create_dir_all(&version_dir)?;
-
-    if target.platform == Platform::Win32 {
-        extract_zip(&archive_path, &version_dir)?;
-    } else {
-        extract_tar_gz(&archive_path, &version_dir)?;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        for entry in fs::read_dir(&version_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_file() {
-                fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-async fn download_and_extract_tempo(
-    config: &Config,
-    downloader: &Downloader,
-    release_url: &str,
-    target: &Target,
-    tag: &str,
-) -> Result<()> {
-    let archive_name = format!(
-        "foundry_nightly_{platform}_{arch}.{ext}",
+        "{prefix}_{version}_{platform}_{arch}.{ext}",
+        prefix = config.network.archive_prefix,
         platform = target.platform.as_str(),
         arch = target.arch.as_str(),
         ext = target.platform.archive_ext()
@@ -422,7 +348,6 @@ async fn download_and_extract_tempo(
 fn verify_installed_binaries(
     config: &Config,
     tag: &str,
-    bins: &[&str],
     hashes: &HashMap<String, String>,
 ) -> Result<()> {
     say("verifying downloaded binaries against the attestation file");
@@ -430,7 +355,7 @@ fn verify_installed_binaries(
     let version_dir = config.version_dir(tag);
     let mut failed = false;
 
-    for bin in bins {
+    for bin in config.network.bins {
         let bin_name = bin_name(bin);
         let expected = hashes.get(*bin).or_else(|| hashes.get(&bin_name));
         let path = version_dir.join(&bin_name);
@@ -473,7 +398,10 @@ async fn download_manpages(
     release_url: &str,
     version: &str,
 ) {
-    let man_url = format!("{release_url}foundry_man_{version}.tar.gz");
+    let man_url = format!(
+        "{release_url}{prefix}_man_{version}.tar.gz",
+        prefix = config.network.archive_prefix
+    );
     say("downloading manpages");
 
     let temp_dir = match tempfile::tempdir() {
@@ -496,7 +424,7 @@ async fn download_manpages(
 }
 
 pub(crate) fn list(config: &Config) -> Result<()> {
-    let bins = config.bins(None);
+    let bins = config.network.bins;
 
     if config.versions_dir.exists() {
         for entry in fs::read_dir(&config.versions_dir)? {
@@ -539,9 +467,7 @@ pub(crate) fn use_version(config: &Config, version: &str) -> Result<()> {
         bail!("version {version} not installed");
     }
 
-    let bins = config.bins(None);
-
-    for bin in bins {
+    for bin in config.network.bins {
         let bin_name = bin_name(bin);
         let src = version_dir.join(&bin_name);
         let dest = config.bin_path(bin);
@@ -587,18 +513,15 @@ in your 'PATH' to allow the newly installed version to take precedence!
     Ok(())
 }
 
-fn normalize_version(version: &str) -> String {
+fn normalize_version(version: &str) -> (String, String) {
     if version.starts_with("nightly") {
-        "nightly".to_string()
-    } else if version.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
-        format!("v{version}")
+        ("nightly".to_string(), version.to_string())
+    } else if version.starts_with(|c: char| c.is_ascii_digit()) {
+        let s = format!("v{version}");
+        (s.clone(), s)
     } else {
-        version.to_string()
+        (version.to_string(), version.to_string())
     }
-}
-
-fn version_to_tag(version: &str) -> String {
-    version.trim_start_matches('v').to_string()
 }
 
 fn bin_name(name: &str) -> String {
