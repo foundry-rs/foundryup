@@ -3,6 +3,11 @@ use eyre::{Result, bail};
 use sysinfo::System;
 
 pub(crate) fn check_bins_in_use(config: &Config) -> Result<()> {
+    // Skip in CI since there are random processes with similar names.
+    if std::env::var_os("CI").is_some() {
+        return Ok(());
+    }
+
     let bins = config.bins(None);
     let mut sys = System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
