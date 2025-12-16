@@ -1,8 +1,0 @@
-blank_issues_enabled: true
-contact_links:
-  - name: Foundry
-    url: https://github.com/foundry-rs/foundry/issues/new/choose
-    about: Please report issues for Forge, Cast and Anvil on their issue tracker.
-  - name: Support
-    url: https://t.me/foundry_support
-    about: This issue tracker is only for bugs and feature requests. Support is available on Telegram!
