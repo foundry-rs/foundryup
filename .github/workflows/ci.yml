@@ -45,6 +45,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - uses: taiki-e/install-action@nextest
       - name: Build
         run: cargo build --target ${{ matrix.target }}
@@ -64,8 +66,9 @@ jobs:
   #       with:
   #         toolchain: stable
   #     - uses: rui314/setup-mold@725a8794d15fc7563f59595bd9556495c0564878 # v1
-  #     - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
   #     - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2
+  #       with:
+  #         cache-on-failure: true
   #     - run: cargo test --workspace --doc
 
   typos:
@@ -93,8 +96,9 @@ jobs:
           toolchain: nightly
           components: clippy
       - uses: rui314/setup-mold@725a8794d15fc7563f59595bd9556495c0564878 # v1
-      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
       - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2
+        with:
+          cache-on-failure: true
       - run: cargo clippy --workspace --all-targets --all-features
         env:
           RUSTFLAGS: -Dwarnings
