@@ -1,4 +1,5 @@
 use eyre::{Result, WrapErr, bail};
+use fs_err as fs;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
@@ -50,13 +51,13 @@ impl Downloader {
         };
 
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent)?;
         }
-        let mut file = std::fs::File::create(path)?;
+        let mut file = fs::File::create(path)?;
         let mut stream = response.bytes_stream();
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.wrap_err("error reading response")?;
+            let chunk = chunk.wrap_err("failed to read response chunk")?;
             file.write_all(&chunk)?;
             pb.inc(chunk.len() as u64);
         }
@@ -78,25 +79,25 @@ impl Downloader {
 }
 
 pub(crate) fn compute_sha256(path: &Path) -> Result<String> {
-    let mut file = std::fs::File::open(path).wrap_err("failed to open file for hashing")?;
+    let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
     std::io::copy(&mut file, &mut hasher)?;
     Ok(hex::encode(hasher.finalize()))
 }
 
 pub(crate) fn extract_tar_gz(archive_path: &Path, dest_dir: &Path) -> Result<()> {
-    let file = std::fs::File::open(archive_path)?;
+    let file = fs::File::open(archive_path)?;
     let gz = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(gz);
-    std::fs::create_dir_all(dest_dir)?;
-    archive.unpack(dest_dir).wrap_err("failed to extract tar.gz archive")?;
+    fs::create_dir_all(dest_dir)?;
+    archive.unpack(dest_dir)?;
     Ok(())
 }
 
 pub(crate) fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<()> {
-    let file = std::fs::File::open(archive_path)?;
+    let file = fs::File::open(archive_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
-    std::fs::create_dir_all(dest_dir)?;
+    fs::create_dir_all(dest_dir)?;
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
@@ -106,12 +107,12 @@ pub(crate) fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<()> {
         };
 
         if file.is_dir() {
-            std::fs::create_dir_all(&outpath)?;
+            fs::create_dir_all(&outpath)?;
         } else {
             if let Some(p) = outpath.parent() {
-                std::fs::create_dir_all(p)?;
+                fs::create_dir_all(p)?;
             }
-            let mut outfile = std::fs::File::create(&outpath)?;
+            let mut outfile = fs::File::create(&outpath)?;
             std::io::copy(&mut file, &mut outfile)?;
         }
 
@@ -119,7 +120,7 @@ pub(crate) fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<()> {
         {
             use std::os::unix::fs::PermissionsExt;
             if let Some(mode) = file.unix_mode() {
-                std::fs::set_permissions(&outpath, std::fs::Permissions::from_mode(mode))?;
+                fs::set_permissions(&outpath, std::fs::Permissions::from_mode(mode))?;
             }
         }
     }

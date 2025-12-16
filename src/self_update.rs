@@ -5,6 +5,7 @@ use crate::{
     say,
 };
 use eyre::Result;
+use fs_err as fs;
 use semver::Version;
 
 pub(crate) async fn run(config: &Config) -> Result<()> {
@@ -40,7 +41,7 @@ pub(crate) async fn run(config: &Config) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o755))?;
+        fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o755))?;
     }
 
     self_replace(&temp_path, &foundryup_path)?;
@@ -81,23 +82,21 @@ pub(crate) async fn check_for_update(_config: &Config) -> Result<Option<String>>
 fn self_replace(src: &std::path::Path, dest: &std::path::Path) -> Result<()> {
     #[cfg(unix)]
     {
-        std::fs::rename(src, dest)?;
+        fs::rename(src, dest)?;
         Ok(())
     }
 
     #[cfg(windows)]
     {
-        use std::process::Command;
-
         let current_exe = std::env::current_exe()?;
         let backup_path = current_exe.with_extension("old.exe");
 
         if backup_path.exists() {
-            std::fs::remove_file(&backup_path).ok();
+            fs::remove_file(&backup_path).ok();
         }
 
-        std::fs::rename(&current_exe, &backup_path)?;
-        std::fs::copy(src, dest)?;
+        fs::rename(&current_exe, &backup_path)?;
+        fs::copy(src, dest)?;
 
         Ok(())
     }

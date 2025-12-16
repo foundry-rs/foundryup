@@ -1,5 +1,6 @@
 use crate::cli::Network;
-use eyre::{Result, WrapErr};
+use eyre::Result;
+use fs_err as fs;
 use std::path::PathBuf;
 
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -47,10 +48,9 @@ impl Config {
     }
 
     pub(crate) fn ensure_dirs(&self) -> Result<()> {
-        std::fs::create_dir_all(&self.versions_dir)
-            .wrap_err("failed to create versions directory")?;
-        std::fs::create_dir_all(&self.bin_dir).wrap_err("failed to create bin directory")?;
-        std::fs::create_dir_all(&self.man_dir).wrap_err("failed to create man directory")?;
+        fs::create_dir_all(&self.versions_dir)?;
+        fs::create_dir_all(&self.bin_dir)?;
+        fs::create_dir_all(&self.man_dir)?;
         Ok(())
     }
 

@@ -10,7 +10,7 @@ pub(crate) fn check_bins_in_use(config: &Config) -> Result<()> {
     for bin in bins {
         if let Some(process) = sys.processes_by_name(bin.as_ref()).next() {
             let name = process.name().to_string_lossy();
-            bail!("Error: '{name}' is currently running. Please stop the process and try again.");
+            bail!("'{name}' is currently running, please stop the process and try again");
         }
     }
 

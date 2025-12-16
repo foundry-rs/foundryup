@@ -1,3 +1,13 @@
+//! # foundryup
+//!
+//! Foundry toolchain manager.
+
+#![cfg_attr(not(test), warn(unused_crate_dependencies))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
+#[cfg(test)]
+use snapbox as _;
+
 use clap::Parser;
 use eyre::Result;
 
@@ -9,7 +19,7 @@ mod platform;
 mod process;
 mod self_update;
 
-use cli::{Cli, Commands};
+use cli::Cli;
 use config::Config;
 
 fn main() -> Result<()> {
@@ -33,27 +43,34 @@ fn main() -> Result<()> {
 async fn run(cli: Cli) -> Result<()> {
     let config = Config::new()?;
 
-    match cli.command {
-        Some(Commands::Completions { shell }) => {
-            cli::print_completions(shell);
-        }
-        _ => {
-            print_banner();
-            check_update(&config).await;
-            process::check_bins_in_use(&config)?;
-
-            match cli.command {
-                None => install::run(&config, cli.install_args).await?,
-                Some(Commands::Install(args)) => install::run(&config, args).await?,
-                Some(Commands::List) => install::list(&config)?,
-                Some(Commands::Use { version }) => install::use_version(&config, &version)?,
-                Some(Commands::Update) => self_update::run(&config).await?,
-                Some(Commands::Completions { .. }) => unreachable!(),
-            }
-        }
+    // Handle --completions first (no banner)
+    if let Some(shell) = cli.completions {
+        cli::print_completions(shell);
+        return Ok(());
     }
 
-    Ok(())
+    // Print banner for all other operations
+    print_banner();
+    check_update(&config).await;
+    process::check_bins_in_use(&config)?;
+
+    // Handle --update
+    if cli.update {
+        return self_update::run(&config).await;
+    }
+
+    // Handle --list
+    if cli.list {
+        return install::list(&config);
+    }
+
+    // Handle --use
+    if let Some(ref version) = cli.use_version {
+        return install::use_version(&config, version);
+    }
+
+    // Default: install
+    install::run(&config, &cli).await
 }
 
 fn print_banner() {
@@ -90,7 +107,7 @@ Installed: {} → Latest: {new_version}
 
 To update, run:
 
-  foundryup update
+  foundryup --update
 
 Updating is highly recommended as it gives you access to the latest features and bug fixes.
 "#,
