@@ -56,7 +56,7 @@ pub(crate) async fn prepare_update() -> eyre::Result<Option<PathBuf>> {
         foundry_home.join(&format!("bin{}foundryup-init{}", MAIN_SEPARATOR, EXE_SUFFIX));
 
     if !foundryup_path.exists() {
-        return Err(FoundryupError::FoundryupNotInstalled { p: foundry_home }.into())
+        return Err(FoundryupError::FoundryupNotInstalled { p: foundry_home }.into());
     }
 
     if setup_path.exists() {
@@ -68,7 +68,7 @@ pub(crate) async fn prepare_update() -> eyre::Result<Option<PathBuf>> {
 
     // If up-to-date
     if release.version == current_version {
-        return Ok(None)
+        return Ok(None);
     }
 
     // Download new version

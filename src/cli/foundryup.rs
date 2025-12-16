@@ -38,7 +38,7 @@ pub async fn run() -> eyre::Result<ExitCode> {
         return match self_cmd {
             FoundryupSelf::Update => self_update::update(&config).await,
             FoundryupSelf::Uninstall => self_update::uninstall(),
-        }
+        };
     }
 
     Ok(0.into())

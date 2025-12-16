@@ -77,7 +77,7 @@ pub(crate) fn wait_for_parent() -> Result<()> {
         let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if snapshot == INVALID_HANDLE_VALUE {
             let err = io::Error::last_os_error();
-            return Err(err).context(FoundryupError::WindowsUninstallMadness)
+            return Err(err).context(FoundryupError::WindowsUninstallMadness);
         }
 
         let snapshot = scopeguard::guard(snapshot, |h| {
@@ -91,7 +91,7 @@ pub(crate) fn wait_for_parent() -> Result<()> {
         let success = Process32First(*snapshot, &mut entry);
         if success == 0 {
             let err = io::Error::last_os_error();
-            return Err(err).context(FoundryupError::WindowsUninstallMadness)
+            return Err(err).context(FoundryupError::WindowsUninstallMadness);
         }
 
         let this_pid = GetCurrentProcessId();
@@ -99,7 +99,7 @@ pub(crate) fn wait_for_parent() -> Result<()> {
             let success = Process32Next(*snapshot, &mut entry);
             if success == 0 {
                 let err = io::Error::last_os_error();
-                return Err(err).context(FoundryupError::WindowsUninstallMadness)
+                return Err(err).context(FoundryupError::WindowsUninstallMadness);
             }
         }
 
@@ -112,7 +112,7 @@ pub(crate) fn wait_for_parent() -> Result<()> {
         let parent = OpenProcess(SYNCHRONIZE, 0, parent_id);
         if parent.is_null() {
             // This just means the parent has already exited.
-            return Ok(())
+            return Ok(());
         }
 
         let parent = scopeguard::guard(parent, |h| {
@@ -124,7 +124,7 @@ pub(crate) fn wait_for_parent() -> Result<()> {
 
         if res != WAIT_OBJECT_0 {
             let err = io::Error::last_os_error();
-            return Err(err).context(FoundryupError::WindowsUninstallMadness)
+            return Err(err).context(FoundryupError::WindowsUninstallMadness);
         }
     }
 
@@ -275,7 +275,7 @@ pub(crate) fn do_add_to_programs() -> Result<()> {
         let mut path = PathBuf::from(OsString::from_wide(&s));
         path.pop();
         if path.exists() {
-            return Ok(())
+            return Ok(());
         }
     }
 
@@ -423,7 +423,7 @@ pub(crate) fn delete_foundry_home() -> Result<()> {
 
         if gc_handle == INVALID_HANDLE_VALUE {
             let err = io::Error::last_os_error();
-            return Err(err).context(FoundryupError::WindowsUninstallMadness)
+            return Err(err).context(FoundryupError::WindowsUninstallMadness);
         }
 
         scopeguard::guard(gc_handle, |h| {

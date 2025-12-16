@@ -70,7 +70,7 @@ pub fn foundry_home_with_cwd_from(env: &dyn Processor, cwd: &Path) -> io::Result
     if let Some(home) = env.var_os("FOUNDRY_HOME").filter(|v| !v.is_empty()) {
         {
             let home = PathBuf::from(home);
-            return if home.is_absolute() { Ok(home) } else { Ok(cwd.join(&home)) }
+            return if home.is_absolute() { Ok(home) } else { Ok(cwd.join(&home)) };
         }
     }
     env.home_dir()
@@ -177,7 +177,7 @@ pub(crate) fn make_executable(path: &Path) -> eyre::Result<()> {
 
         // Check if permissions are ok already - #1638
         if mode == new_mode {
-            return Ok(())
+            return Ok(());
         }
 
         perms.set_mode(new_mode);
