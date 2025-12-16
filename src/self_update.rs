@@ -59,7 +59,7 @@ pub(crate) async fn check_for_update(_config: &Config) -> Result<Option<String>>
     let response = match downloader.download_to_string(&releases_url).await {
         Ok(r) => r,
         Err(e) => {
-            tracing::debug!("failed to check for updates: {e}");
+            debug!("failed to check for updates: {e}");
             return Ok(None);
         }
     };

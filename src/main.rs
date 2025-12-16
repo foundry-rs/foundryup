@@ -5,11 +5,15 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+#[macro_use]
+extern crate tracing;
+
 #[cfg(test)]
 use snapbox as _;
 
 use clap::Parser;
 use eyre::Result;
+use std::sync::Arc;
 
 mod cli;
 mod config;
@@ -23,6 +27,7 @@ use cli::Cli;
 use config::Config;
 
 fn main() -> Result<()> {
+    color_eyre::install()?;
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::builder()
@@ -41,7 +46,7 @@ fn main() -> Result<()> {
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    let config = Config::new()?;
+    let config = Arc::new(Config::new()?);
 
     // Handle --completions first (no banner)
     if let Some(shell) = cli.completions {
@@ -49,28 +54,29 @@ async fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
-    // Print banner for all other operations
     print_banner();
-    check_update(&config).await;
-    process::check_bins_in_use(&config)?;
 
-    // Handle --update
     if cli.update {
         return self_update::run(&config).await;
     }
 
-    // Handle --list
+    let update_handle = tokio::spawn({
+        let config = config.clone();
+        async move { self_update::check_for_update(&config).await }
+    });
+
     if cli.list {
-        return install::list(&config);
+        install::list(&config)?;
+    } else if let Some(ref version) = cli.use_version {
+        install::use_version(&config, version)?;
+    } else {
+        process::check_bins_in_use(&config)?;
+        install::run(&config, &cli).await?;
     }
 
-    // Handle --use
-    if let Some(ref version) = cli.use_version {
-        return install::use_version(&config, version);
-    }
+    print_update(update_handle.await?);
 
-    // Default: install
-    install::run(&config, &cli).await
+    Ok(())
 }
 
 fn print_banner() {
@@ -95,9 +101,8 @@ Contribute : https://github.com/foundry-rs/foundry/blob/HEAD/CONTRIBUTING.md
     );
 }
 
-async fn check_update(config: &Config) {
-    say("checking if foundryup is up to date...");
-    match self_update::check_for_update(config).await {
+fn print_update(res: Result<Option<String>>) {
+    match res {
         Ok(Some(new_version)) => {
             eprintln!(
                 r#"
