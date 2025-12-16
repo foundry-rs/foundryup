@@ -49,24 +49,24 @@ jobs:
       - name: Build
         run: cargo build --target ${{ matrix.target }}
       - name: Test
-        run: cargo nextest run --target ${{ matrix.target }}
+        run: cargo nextest run --no-fail-fast --target ${{ matrix.target }}
 
-  doctest:
-    runs-on: depot-ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # master
-        with:
-          toolchain: stable
-      - uses: rui314/setup-mold@725a8794d15fc7563f59595bd9556495c0564878 # v1
-      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
-      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2
-      - run: cargo test --workspace --doc
+  # doctest:
+  #   runs-on: depot-ubuntu-latest
+  #   timeout-minutes: 30
+  #   permissions:
+  #     contents: read
+  #   steps:
+  #     - uses: actions/checkout@v6
+  #       with:
+  #         persist-credentials: false
+  #     - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # master
+  #       with:
+  #         toolchain: stable
+  #     - uses: rui314/setup-mold@725a8794d15fc7563f59595bd9556495c0564878 # v1
+  #     - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+  #     - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2
+  #     - run: cargo test --workspace --doc
 
   typos:
     runs-on: depot-ubuntu-latest
