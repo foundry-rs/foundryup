@@ -48,7 +48,7 @@ Options:
 
   -n, --network <NETWORK>
           Install binaries for a specific network (e.g., tempo)
-
+          
           [possible values: tempo]
 
   -f, --force
@@ -62,7 +62,7 @@ Options:
 
       --completions <SHELL>
           Generate shell completions
-
+          
           [possible values: bash, elvish, fish, powershell, zsh]
 
   -h, --help
