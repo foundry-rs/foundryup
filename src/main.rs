@@ -51,8 +51,6 @@ async fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
-    print_banner();
-
     if cli.update {
         return self_update::run(&config).await;
     }
@@ -67,6 +65,7 @@ async fn run(cli: Cli) -> Result<()> {
     } else if let Some(ref version) = cli.use_version {
         install::use_version(&config, version)?;
     } else {
+        print_banner();
         process::check_bins_in_use(&config)?;
         install::run(&config, &cli).await?;
     }

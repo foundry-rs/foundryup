@@ -1,6 +1,8 @@
 use snapbox::{cmd::Command, str};
 use std::path::Path;
 
+const BINS: &[&str] = &["forge", "cast", "anvil", "chisel"];
+
 fn foundryup() -> Command {
     Command::new(snapbox::cmd::cargo_bin!("foundryup")).env("NO_COLOR", "1")
 }
@@ -142,14 +144,13 @@ fn list_empty() {
         .success();
 }
 
-#[test]
-fn install_stable() {
+fn test_install(version: &str) {
     let temp_dir = tempfile::Builder::new().prefix("foundryup-test-stable").tempdir().unwrap();
     let foundry_dir = temp_dir.path().join(".foundry");
 
     foundryup()
         .env("FOUNDRY_DIR", &foundry_dir)
-        .args(["-i", "stable"])
+        .args(["-i", version])
         .assert()
         .success()
         .stderr_eq(str![[r#"
@@ -158,34 +159,40 @@ fn install_stable() {
 ...
 "#]]);
 
-    assert!(foundry_dir.join("bin/forge").exists());
-    assert!(foundry_dir.join("bin/cast").exists());
-    assert!(foundry_dir.join("bin/anvil").exists());
-    assert!(foundry_dir.join("bin/chisel").exists());
+    for &bin in BINS {
+        let name = format!("{bin}{}", std::env::consts::EXE_EXTENSION);
+        assert!(foundry_dir.join("bin").join(&name).exists(), "{name} does not exist");
+    }
 
     run_forge(&foundry_dir);
+
+    foundryup().env("FOUNDRY_DIR", &foundry_dir).arg("--list").assert().success().stderr_eq(str![
+        [r#"
+...
+foundryup: - forge [..]
+foundryup: - cast [..]
+foundryup: - anvil [..]
+foundryup: - chisel [..]
+...
+"#]
+    ]);
 }
 
 #[test]
+fn install_stable() {
+    test_install("stable");
+}
+#[test]
 fn install_nightly() {
-    let temp_dir = tempfile::Builder::new().prefix("foundryup-test-nightly").tempdir().unwrap();
-    let foundry_dir = temp_dir.path().join(".foundry");
-
-    foundryup()
-        .env("FOUNDRY_DIR", &foundry_dir)
-        .args(["-i", "nightly"])
-        .assert()
-        .success()
-        .stderr_eq(str![[r#"
-...
-[..]done!
-...
-"#]]);
-
-    assert!(foundry_dir.join("bin/forge").exists());
-    assert!(foundry_dir.join("bin/cast").exists());
-
-    run_forge(&foundry_dir);
+    test_install("nightly");
+}
+#[test]
+fn install_v1_5_0() {
+    test_install("v1.5.0");
+}
+#[test]
+fn install_1_5_0() {
+    test_install("1.5.0");
 }
 
 #[test]
@@ -195,15 +202,6 @@ fn list_after_install() {
     let foundry_dir = temp_dir.path().join(".foundry");
 
     foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["-i", "stable"]).assert().success();
-
-    foundryup().env("FOUNDRY_DIR", &foundry_dir).arg("--list").assert().success().stderr_eq(str![
-        [r#"
-...
-[..]stable
-[..]forge [..]
-...
-"#]
-    ]);
 }
 
 #[test]
