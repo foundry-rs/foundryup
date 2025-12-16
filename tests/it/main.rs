@@ -259,7 +259,7 @@ fn install_tempo_nightly() {
 "#]]);
 
     for &bin in TEMPO_BINS {
-        let name = format!("{bin}{}", std::env::consts::EXE_EXTENSION);
+        let name = format!("{bin}{EXE_SUFFIX}");
         assert!(foundry_dir.join("bin").join(&name).exists(), "{name} does not exist");
     }
 
