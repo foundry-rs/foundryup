@@ -4,22 +4,29 @@ use crate::{
     platform::Target,
     say,
 };
-use eyre::Result;
+use eyre::{Result, WrapErr};
 use fs_err as fs;
 use semver::Version;
+use tracing::debug;
 
 pub(crate) async fn run(config: &Config) -> Result<()> {
-    say("updating foundryup...");
+    say("checking for updates...");
 
-    let downloader = Downloader::new()?;
-    let new_version = match check_for_update(config).await? {
-        Some(v) => v,
-        None => {
+    let new_version = match check_for_update(config).await {
+        Ok(Some(v)) => v,
+        Ok(None) => {
             say(&format!("foundryup is already up to date (installed: {VERSION})"));
             return Ok(());
         }
+        Err(e) => {
+            debug!("update check failed: {e}");
+            return Err(e).wrap_err("failed to check for updates");
+        }
     };
 
+    say(&format!("downloading foundryup v{new_version}..."));
+
+    let downloader = Downloader::new()?;
     let target = Target::detect(None, None)?;
     let archive_name = format!(
         "foundryup_{platform}_{arch}",
@@ -34,17 +41,18 @@ pub(crate) async fn run(config: &Config) -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
     let temp_path = temp_dir.path().join("foundryup_new");
 
-    downloader.download_to_file(&download_url, &temp_path).await?;
+    downloader
+        .download_to_file(&download_url, &temp_path)
+        .await
+        .wrap_err_with(|| format!("failed to download foundryup v{new_version}"))?;
 
-    let foundryup_path = config.foundryup_path();
+    say("installing update...");
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o755))?;
-    }
+    self_replace::self_replace(&temp_path).wrap_err("failed to replace foundryup binary")?;
 
-    self_replace(&temp_path, &foundryup_path)?;
+    let _ = fs::remove_file(temp_path);
+
+    let _ = config;
 
     say(&format!("successfully updated foundryup: {VERSION} → {new_version}"));
 
@@ -56,48 +64,32 @@ pub(crate) async fn check_for_update(_config: &Config) -> Result<Option<String>>
 
     let releases_url = format!("https://api.github.com/repos/{FOUNDRYUP_REPO}/releases/latest");
 
-    let response = match downloader.download_to_string(&releases_url).await {
-        Ok(r) => r,
+    debug!("fetching latest release from {releases_url}");
+
+    let response = downloader
+        .download_to_string(&releases_url)
+        .await
+        .wrap_err("failed to fetch release information")?;
+
+    let json: serde_json::Value =
+        serde_json::from_str(&response).wrap_err("failed to parse release JSON")?;
+
+    let tag_name = json["tag_name"]
+        .as_str()
+        .ok_or_else(|| eyre::eyre!("missing tag_name in release response"))?;
+
+    let remote_version = tag_name.trim_start_matches('v');
+
+    debug!("current version: {VERSION}, remote version: {remote_version}");
+
+    let current = Version::parse(VERSION).wrap_err("failed to parse current version")?;
+    let remote = match Version::parse(remote_version) {
+        Ok(v) => v,
         Err(e) => {
-            debug!("failed to check for updates: {e}");
+            debug!("failed to parse remote version '{remote_version}': {e}");
             return Ok(None);
         }
     };
 
-    let json: serde_json::Value = serde_json::from_str(&response)?;
-    let tag_name =
-        json["tag_name"].as_str().ok_or_else(|| eyre::eyre!("missing tag_name in release"))?;
-
-    let remote_version = tag_name.trim_start_matches('v');
-
-    let current = Version::parse(VERSION)?;
-    let remote = match Version::parse(remote_version) {
-        Ok(v) => v,
-        Err(_) => return Ok(None),
-    };
-
     if remote > current { Ok(Some(remote_version.to_string())) } else { Ok(None) }
-}
-
-fn self_replace(src: &std::path::Path, dest: &std::path::Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        fs::rename(src, dest)?;
-        Ok(())
-    }
-
-    #[cfg(windows)]
-    {
-        let current_exe = std::env::current_exe()?;
-        let backup_path = current_exe.with_extension("old.exe");
-
-        if backup_path.exists() {
-            fs::remove_file(&backup_path).ok();
-        }
-
-        fs::rename(&current_exe, &backup_path)?;
-        fs::copy(src, dest)?;
-
-        Ok(())
-    }
 }

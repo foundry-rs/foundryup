@@ -67,10 +67,6 @@ impl Config {
         self.bin_dir.join(name)
     }
 
-    pub(crate) fn foundryup_path(&self) -> PathBuf {
-        self.bin_path("foundryup")
-    }
-
     pub(crate) fn bins(&self, network: Option<Network>) -> &'static [&'static str] {
         match network {
             Some(Network::Tempo) => TEMPO_BINS,

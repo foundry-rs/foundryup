@@ -5,9 +5,6 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-#[macro_use]
-extern crate tracing;
-
 #[cfg(test)]
 use snapbox as _;
 

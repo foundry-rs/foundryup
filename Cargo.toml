@@ -50,6 +50,7 @@ sha2 = "0.10"
 sysinfo = "0.36"
 tar = "0.4"
 tempfile = "3"
+self-replace = "1"
 which = "8"
 zip = { version = "6", default-features = false, features = ["deflate"] }
 
