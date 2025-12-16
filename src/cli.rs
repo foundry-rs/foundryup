@@ -45,7 +45,7 @@ pub(crate) enum Commands {
 #[derive(Debug, Clone, Default, Parser)]
 pub(crate) struct InstallArgs {
     /// Install a specific version from built binaries (e.g., stable, nightly, 0.3.0)
-    #[arg(short = 'i', long = "install", value_name = "VERSION")]
+    #[arg(id = "ver", short = 'i', long = "install", value_name = "VERSION")]
     pub version: Option<String>,
 
     /// Build and install a specific branch
