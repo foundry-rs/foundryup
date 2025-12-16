@@ -49,15 +49,15 @@ async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
         None
     };
 
-    download_and_extract(config, &downloader, &release_url, &version, tag, &target).await?;
+    download_and_extract(config, &downloader, &release_url, &version, &tag, &target).await?;
 
     if let Some(ref hashes) = hashes {
-        verify_installed_binaries(config, tag, hashes)?;
+        verify_installed_binaries(config, &tag, hashes)?;
     }
 
     download_manpages(config, &downloader, &release_url, &version).await;
 
-    use_version(config, tag)?;
+    use_version(config, &tag)?;
     say("done!");
 
     Ok(())
