@@ -18,7 +18,7 @@ unused_must_use = "deny"
 all = { level = "warn", priority = -1 }
 
 [build-dependencies]
-vergen-git2 = { version = "1", features = ["build", "rustc"] }
+vergen-gitcl = { version = "1", features = ["build", "rustc"] }
 
 [dependencies]
 # async
@@ -50,6 +50,7 @@ serde_json = "1"
 base64 = "0.22"
 indicatif = "0.17"
 sysinfo = "0.33"
+which = "7"
 
 # tracing
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

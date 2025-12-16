@@ -565,7 +565,7 @@ pub(crate) fn use_version(config: &Config, version: &str) -> Result<()> {
             Err(_) => say(&format!("use - {bin}")),
         }
 
-        if let Some(which_path) = which(bin) {
+        if let Ok(which_path) = which::which(bin) {
             if which_path != dest {
                 warn("");
                 eprintln!(
@@ -607,15 +607,6 @@ fn get_bin_version(path: &Path) -> Result<String> {
     let output = std::process::Command::new(path).arg("-V").output()?;
     let version = String::from_utf8_lossy(&output.stdout);
     Ok(version.trim().to_string())
-}
-
-fn which(name: &str) -> Option<std::path::PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths).find_map(|dir| {
-            let path = dir.join(bin_name(name));
-            if path.is_file() { Some(path) } else { None }
-        })
-    })
 }
 
 #[cfg(test)]
