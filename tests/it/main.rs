@@ -115,7 +115,7 @@ fn conflicting_args() {
     foundryup().args(["--pr", "123", "--branch", "main"]).assert().failure().stderr_eq(str![[r#"
 error: the argument '--pr <PR>' cannot be used with '--branch <BRANCH>'
 
-Usage: foundryup --pr <PR>
+Usage: foundryup[EXE] --pr <PR>
 
 For more information, try '--help'.
 
@@ -124,8 +124,7 @@ For more information, try '--help'.
 
 #[test]
 fn use_nonexistent_version() {
-    let temp_dir =
-        tempfile::Builder::new().prefix("foundryup-test-use-nonexistent").tempdir().unwrap();
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
 
     foundryup()
         .env("FOUNDRY_DIR", temp_dir.path().join(".foundry"))
@@ -141,7 +140,7 @@ fn use_nonexistent_version() {
 
 #[test]
 fn list_empty() {
-    let temp_dir = tempfile::Builder::new().prefix("foundryup-test-list-empty").tempdir().unwrap();
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
 
     foundryup()
         .env("FOUNDRY_DIR", temp_dir.path().join(".foundry"))
@@ -151,7 +150,7 @@ fn list_empty() {
 }
 
 fn test_install(version: &str) {
-    let temp_dir = tempfile::Builder::new().prefix("foundryup-test-stable").tempdir().unwrap();
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
     let foundry_dir = temp_dir.path().join(".foundry");
 
     foundryup()
@@ -203,7 +202,7 @@ fn install_1_5_0() {
 
 #[test]
 fn use_version() {
-    let temp_dir = tempfile::Builder::new().prefix("foundryup-test-use").tempdir().unwrap();
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
     let foundry_dir = temp_dir.path().join(".foundry");
 
     foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["-i", "stable"]).assert().success();
@@ -222,7 +221,7 @@ fn use_version() {
 
 #[test]
 fn reinstall_uses_cache() {
-    let temp_dir = tempfile::Builder::new().prefix("foundryup-test-cache").tempdir().unwrap();
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
     let foundry_dir = temp_dir.path().join(".foundry");
 
     foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["-i", "stable"]).assert().success();
@@ -243,8 +242,7 @@ fn reinstall_uses_cache() {
 
 #[test]
 fn install_tempo_nightly() {
-    let temp_dir =
-        tempfile::Builder::new().prefix("foundryup-test-tempo-nightly").tempdir().unwrap();
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
     let foundry_dir = temp_dir.path().join(".foundry");
 
     foundryup()
