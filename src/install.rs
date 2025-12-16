@@ -98,6 +98,7 @@ async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> R
 
     let mut cmd = tokio::process::Command::new("cargo");
     cmd.arg("build").arg("--bins").arg("--release").current_dir(local_path);
+    cmd.env("RUSTFLAGS", rustflags());
 
     if let Some(jobs) = args.jobs {
         cmd.arg("--jobs").arg(jobs.to_string());
@@ -195,6 +196,7 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
 
     let mut cmd = tokio::process::Command::new("cargo");
     cmd.arg("build").arg("--bins").arg("--release").current_dir(&repo_path);
+    cmd.env("RUSTFLAGS", rustflags());
 
     if let Some(jobs) = args.jobs {
         cmd.arg("--jobs").arg(jobs.to_string());
@@ -607,6 +609,10 @@ fn get_bin_version(path: &Path) -> Result<String> {
     let output = std::process::Command::new(path).arg("-V").output()?;
     let version = String::from_utf8_lossy(&output.stdout);
     Ok(version.trim().to_string())
+}
+
+fn rustflags() -> String {
+    std::env::var("RUSTFLAGS").unwrap_or_else(|_| "-C target-cpu=native".to_string())
 }
 
 #[cfg(test)]
