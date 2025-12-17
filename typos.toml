@@ -1,0 +1,19 @@
+[files]
+extend-exclude = [
+    ".git",
+    "target",
+    "testdata",
+    "Cargo.toml",
+    "Cargo.lock",
+    "*.json",
+    "*.js",
+    "*.css",
+    "*.html",
+    "**/tests/**",
+    "**/test/**",
+    "**/*_test.*",
+    "**/*_tests.*",
+]
+
+[default.extend-words]
+ba = "ba"
