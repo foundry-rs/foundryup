@@ -78,7 +78,7 @@ jobs:
       - name: Prepare artifact
         shell: bash
         run: |
-          if [[ "${{ matrix.target }}" == "win32" ]]; then
+          if [[ "${{ matrix.platform }}" == "win32" ]]; then
             exe=".exe"
           fi
           cp target/${{ matrix.target }}/release/foundryup${exe} foundryup_${{ matrix.platform }}_${{ matrix.arch }}
