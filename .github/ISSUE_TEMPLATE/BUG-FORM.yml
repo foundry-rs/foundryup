@@ -1,0 +1,42 @@
+name: Bug report
+description: File a bug report
+labels: ["T-bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please ensure that the bug has not already been filed in the issue tracker.
+
+        Thanks for taking the time to report this bug!
+  - type: checkboxes
+    attributes:
+      label: Have you ensured that foundryup is up to date?
+      options:
+        - label: "Yes"
+  - type: input
+    attributes:
+      label: What version of Foundryup are you on?
+      placeholder: "Run foundryup --version and paste the output here"
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: What command(s) is the bug in?
+      description: Leave empty if not relevant
+      placeholder: "For example: foundryup --install stable"
+  - type: dropdown
+    attributes:
+      label: Operating System
+      description: What operating system are you on?
+      options:
+        - Windows
+        - macOS (Intel)
+        - macOS (Apple Silicon)
+        - Linux
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Describe the bug
+    validations:
+      required: true
