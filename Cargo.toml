@@ -17,6 +17,14 @@ unused_must_use = "deny"
 [lints.clippy]
 all = { level = "warn", priority = -1 }
 
+[profile.release]
+opt-level = "s"
+lto = "thin"
+debug = "none"
+strip = "debuginfo"
+panic = "abort"
+codegen-units = 16
+
 [build-dependencies]
 vergen-gitcl = { version = "1", features = ["build", "rustc"] }
 
@@ -27,7 +35,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "gzip",
     "stream",
 ] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "process", "io-util"] }
 futures-util = "0.3"
 
 # cli
