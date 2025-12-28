@@ -131,47 +131,25 @@ main() {
     ignore rm "$_file"
     ignore rmdir "$_dir"
 
-    say "running foundryup..."
-
-    # Run foundryup to install foundry
-    if [ "$_need_tty" = "yes" ] && [ ! -t 0 ]; then
-        if [ ! -t 1 ]; then
-            err "unable to run interactively"
-            exit 1
-        fi
-        # shellcheck disable=SC2086
-        ignore "$FOUNDRYUP_BIN_DIR/foundryup" $_passthrough_args < /dev/tty
-    else
-        # shellcheck disable=SC2086
-        ignore "$FOUNDRYUP_BIN_DIR/foundryup" $_passthrough_args
-    fi
-
-    local _retval=$?
-
-    if [ $_retval -eq 0 ]; then
-        ensure_path
-    fi
-
-    return "$_retval"
+    post_install
 }
 
-ensure_path() {
+post_install() {
+    say ""
+    say "foundryup was installed successfully!"
+    say ""
+
     # Check if bin dir is in PATH
     case ":$PATH:" in
         *":$FOUNDRYUP_BIN_DIR:"*)
+            say "Run 'foundryup' to install Foundry."
             ;;
         *)
-            say ""
-            say "foundryup was installed successfully!"
-            say ""
-            say "To get started, you may need to add the following to your shell profile:"
+            say "To get started, add foundryup to your PATH:"
             say ""
             say "  export PATH=\"\$PATH:$FOUNDRYUP_BIN_DIR\""
             say ""
-            say "Then restart your shell or run:"
-            say ""
-            say "  source ~/.bashrc  # or ~/.zshrc, etc."
-            say ""
+            say "Then run 'foundryup' to install Foundry."
             ;;
     esac
 }

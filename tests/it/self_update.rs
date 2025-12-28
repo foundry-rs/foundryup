@@ -12,11 +12,9 @@ fn update_flag_help() {
 
 #[test]
 fn update_checks_for_updates() {
-    let output = foundryup().arg("-U").env("NO_COLOR", "1").output().unwrap();
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("checking for updates"),
-        "expected 'checking for updates' message, got: {stderr}"
-    );
+    foundryup().arg("-U").assert().stderr_eq(str![[r#"
+...
+foundryup: checking for updates...
+...
+"#]]);
 }

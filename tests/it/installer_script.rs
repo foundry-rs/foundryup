@@ -294,3 +294,46 @@ echo "$FOUNDRYUP_BIN_DIR"
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("/custom/path/bin"));
 }
+
+#[test]
+fn script_downloads_foundryup() {
+    let temp_dir = std::env::temp_dir().join(format!("foundryup-test-{}", std::process::id()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let bin_dir = temp_dir.join("bin");
+    let foundryup_path = bin_dir.join("foundryup");
+
+    let output = Command::new("sh")
+        .args(["foundryup-init.sh", "-y"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("FOUNDRY_DIR", &temp_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "script failed:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        foundryup_path.exists(),
+        "foundryup binary not found at {foundryup_path:?}\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = std::fs::metadata(&foundryup_path).unwrap();
+        let permissions = metadata.permissions();
+        assert!(
+            permissions.mode() & 0o111 != 0,
+            "foundryup should be executable"
+        );
+    }
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
