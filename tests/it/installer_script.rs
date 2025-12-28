@@ -315,10 +315,7 @@ fn script_downloads_foundryup() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(
-        output.status.success(),
-        "script failed:\nstdout: {stdout}\nstderr: {stderr}"
-    );
+    assert!(output.status.success(), "script failed:\nstdout: {stdout}\nstderr: {stderr}");
     assert!(
         foundryup_path.exists(),
         "foundryup binary not found at {foundryup_path:?}\nstdout: {stdout}\nstderr: {stderr}"
@@ -329,10 +326,7 @@ fn script_downloads_foundryup() {
         use std::os::unix::fs::PermissionsExt;
         let metadata = std::fs::metadata(&foundryup_path).unwrap();
         let permissions = metadata.permissions();
-        assert!(
-            permissions.mode() & 0o111 != 0,
-            "foundryup should be executable"
-        );
+        assert!(permissions.mode() & 0o111 != 0, "foundryup should be executable");
     }
 
     std::fs::remove_dir_all(&temp_dir).ok();
