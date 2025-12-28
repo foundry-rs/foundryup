@@ -4,6 +4,9 @@ use std::{env::consts::EXE_SUFFIX, path::Path};
 const BINS: &[&str] = &["forge", "cast", "anvil", "chisel"];
 const TEMPO_BINS: &[&str] = &["forge", "cast"];
 
+mod installer_script;
+mod self_update;
+
 fn foundryup() -> Command {
     Command::new(snapbox::cmd::cargo_bin!("foundryup")).env("NO_COLOR", "1")
 }
