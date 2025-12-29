@@ -24,18 +24,23 @@ FOUNDRYUP_BIN_DIR="${FOUNDRY_DIR:-$HOME/.foundry}/bin"
 
 usage() {
     cat <<EOF
-foundryup-init
+foundryup-init 2.0.0
 
 The installer for foundryup
 
 Usage: foundryup-init.sh [OPTIONS]
 
 Options:
-  -h, --help      Print help
-  -v, --version   Install a specific version of foundryup
+  -v, --verbose   Enable verbose output
+  -q, --quiet     Disable progress output
   -y              Skip confirmation prompt
+  -h, --help      Print help
+  -V, --version   Print version
 
 All other options are passed to foundryup after installation.
+
+Environment variables:
+  FOUNDRYUP_VERSION   Install a specific version of foundryup
 EOF
 }
 
@@ -52,9 +57,10 @@ main() {
     local _arch="$RETVAL"
     assert_nz "$_arch" "arch"
 
-    local _version=""
     local _passthrough_args=""
     local _need_tty=yes
+    local _verbose=no
+    local _quiet=no
 
     for arg in "$@"; do
         case "$arg" in
@@ -62,41 +68,40 @@ main() {
                 usage
                 exit 0
                 ;;
-            -v|--version)
-                # Next arg will be the version
+            -V|--version)
+                echo "foundryup-init 2.0.0"
+                exit 0
+                ;;
+            -v|--verbose)
+                _verbose=yes
+                _passthrough_args="$_passthrough_args $arg"
+                ;;
+            -q|--quiet)
+                _quiet=yes
+                _passthrough_args="$_passthrough_args $arg"
                 ;;
             -y)
                 _need_tty=no
                 _passthrough_args="$_passthrough_args $arg"
                 ;;
             *)
-                if [ -n "$_version" ] || [ "${arg#-}" != "$arg" ]; then
-                    _passthrough_args="$_passthrough_args $arg"
-                else
-                    # Check if previous was -v/--version
-                    case "$_passthrough_args" in
-                        *"-v"|*"--version")
-                            _version="$arg"
-                            # Remove the -v/--version from passthrough
-                            _passthrough_args="${_passthrough_args% -v}"
-                            _passthrough_args="${_passthrough_args% --version}"
-                            ;;
-                        *)
-                            _passthrough_args="$_passthrough_args $arg"
-                            ;;
-                    esac
-                fi
+                _passthrough_args="$_passthrough_args $arg"
                 ;;
         esac
     done
 
     local _url
-    if [ -n "$_version" ]; then
-        say "installing foundryup version $_version"
-        _url="https://github.com/${FOUNDRYUP_REPO}/releases/download/v${_version}/foundryup_${_arch}"
+    if [ "${FOUNDRYUP_VERSION+set}" = 'set' ]; then
+        say "installing foundryup version $FOUNDRYUP_VERSION"
+        _url="https://github.com/${FOUNDRYUP_REPO}/releases/download/v${FOUNDRYUP_VERSION}/foundryup_${_arch}"
     else
         say "installing latest foundryup"
         _url="https://github.com/${FOUNDRYUP_REPO}/releases/latest/download/foundryup_${_arch}"
+    fi
+
+    if [ "$_verbose" = "yes" ]; then
+        say "url: $_url"
+        say "arch: $_arch"
     fi
 
     local _dir
@@ -126,47 +131,25 @@ main() {
     ignore rm "$_file"
     ignore rmdir "$_dir"
 
-    say "running foundryup..."
-
-    # Run foundryup to install foundry
-    if [ "$_need_tty" = "yes" ] && [ ! -t 0 ]; then
-        if [ ! -t 1 ]; then
-            err "unable to run interactively"
-            exit 1
-        fi
-        # shellcheck disable=SC2086
-        ignore "$FOUNDRYUP_BIN_DIR/foundryup" $_passthrough_args < /dev/tty
-    else
-        # shellcheck disable=SC2086
-        ignore "$FOUNDRYUP_BIN_DIR/foundryup" $_passthrough_args
-    fi
-
-    local _retval=$?
-
-    if [ $_retval -eq 0 ]; then
-        ensure_path
-    fi
-
-    return "$_retval"
+    post_install
 }
 
-ensure_path() {
+post_install() {
+    say ""
+    say "foundryup was installed successfully!"
+    say ""
+
     # Check if bin dir is in PATH
     case ":$PATH:" in
         *":$FOUNDRYUP_BIN_DIR:"*)
+            say "Run 'foundryup' to install Foundry."
             ;;
         *)
-            say ""
-            say "foundryup was installed successfully!"
-            say ""
-            say "To get started, you may need to add the following to your shell profile:"
+            say "To get started, add foundryup to your PATH:"
             say ""
             say "  export PATH=\"\$PATH:$FOUNDRYUP_BIN_DIR\""
             say ""
-            say "Then restart your shell or run:"
-            say ""
-            say "  source ~/.bashrc  # or ~/.zshrc, etc."
-            say ""
+            say "Then run 'foundryup' to install Foundry."
             ;;
     esac
 }
