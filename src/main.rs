@@ -50,6 +50,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
 
     let config = Arc::new(Config::new(cli.network)?);
+    config.migrate_legacy_versions()?;
 
     if cli.update {
         return self_update::run(&config).await;
@@ -63,7 +64,7 @@ async fn run(cli: Cli) -> Result<()> {
     if cli.list {
         install::list(&config)?;
     } else if let Some(ref version) = cli.use_version {
-        install::use_version(&config, version)?;
+        install::use_version(&config, config.network.repo, version)?;
     } else {
         print_banner();
         process::check_bins_in_use(&config)?;

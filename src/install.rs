@@ -32,6 +32,8 @@ async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
     let (version, tag) =
         normalize_version(args.version.as_deref().unwrap_or(config.network.default_version));
 
+    let repo = config.network.repo;
+
     say!("installing {} (version {version}, tag {tag})", config.network.display_name);
 
     let target = Target::detect(args.platform.as_deref(), args.arch.as_deref())?;
@@ -41,7 +43,8 @@ async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
         format!("https://github.com/{}/releases/download/{tag}/", config.network.repo);
 
     let hashes = if config.network.has_attestation && !args.force {
-        fetch_and_verify_attestation(config, &downloader, &release_url, &version, &target).await?
+        fetch_and_verify_attestation(config, repo, &downloader, &release_url, &version, &target)
+            .await?
     } else if args.force {
         say!("skipped SHA verification due to --force flag");
         None
@@ -49,15 +52,15 @@ async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
         None
     };
 
-    download_and_extract(config, &downloader, &release_url, &version, &tag, &target).await?;
+    download_and_extract(config, repo, &downloader, &release_url, &version, &tag, &target).await?;
 
     if let Some(ref hashes) = hashes {
-        verify_installed_binaries(config, &tag, hashes)?;
+        verify_installed_binaries(config, repo, &tag, hashes)?;
     }
 
     download_manpages(config, &downloader, &release_url, &version).await;
 
-    use_version(config, &tag)?;
+    use_version(config, repo, &tag)?;
     say!("done!");
 
     Ok(())
@@ -180,7 +183,7 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
         bail!("cargo build failed");
     }
 
-    let version_dir = config.version_dir(&version);
+    let version_dir = config.version_dir(repo, &version);
     fs::create_dir_all(&version_dir)?;
 
     for bin in config.network.bins {
@@ -190,7 +193,7 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
         }
     }
 
-    use_version(config, &version)?;
+    use_version(config, repo, &version)?;
     say!("done");
 
     Ok(())
@@ -198,6 +201,7 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
 
 async fn fetch_and_verify_attestation(
     config: &Config,
+    repo: &str,
     downloader: &Downloader,
     release_url: &str,
     version: &str,
@@ -234,7 +238,7 @@ async fn fetch_and_verify_attestation(
 
     let hashes = parse_attestation_payload(&artifact_json)?;
 
-    let version_dir = config.version_dir(version);
+    let version_dir = config.version_dir(repo, version);
 
     if version_dir.exists() {
         let mut all_match = true;
@@ -260,7 +264,7 @@ async fn fetch_and_verify_attestation(
 
         if all_match {
             say!("version {version} already installed and verified, activating...");
-            use_version(config, version)?;
+            use_version(config, repo, version)?;
             say!("done!");
             std::process::exit(0);
         }
@@ -297,6 +301,7 @@ fn parse_attestation_payload(json: &str) -> Result<HashMap<String, String>> {
 
 async fn download_and_extract(
     config: &Config,
+    repo: &str,
     downloader: &Downloader,
     release_url: &str,
     version: &str,
@@ -319,7 +324,7 @@ async fn download_and_extract(
 
     downloader.download_to_file(&archive_url, &archive_path).await?;
 
-    let version_dir = config.version_dir(tag);
+    let version_dir = config.version_dir(repo, tag);
     fs::create_dir_all(&version_dir)?;
 
     if target.platform == Platform::Win32 {
@@ -345,12 +350,13 @@ async fn download_and_extract(
 
 fn verify_installed_binaries(
     config: &Config,
+    repo: &str,
     tag: &str,
     hashes: &HashMap<String, String>,
 ) -> Result<()> {
     say!("verifying downloaded binaries against the attestation file");
 
-    let version_dir = config.version_dir(tag);
+    let version_dir = config.version_dir(repo, tag);
     let mut failed = false;
 
     for bin in config.network.bins {
@@ -425,23 +431,50 @@ pub(crate) fn list(config: &Config) -> Result<()> {
     let bins = config.network.bins;
 
     if config.versions_dir.exists() {
-        for entry in fs::read_dir(&config.versions_dir)? {
-            let entry = entry?;
-            let version_name = entry.file_name();
-            let version_name = version_name.to_string_lossy();
+        for owner_entry in fs::read_dir(&config.versions_dir)? {
+            let owner_entry = owner_entry?;
+            let owner_path = owner_entry.path();
+            if !owner_path.is_dir() {
+                continue;
+            }
 
-            say!("{version_name}");
+            let owner_name = owner_entry.file_name();
+            let owner_name = owner_name.to_string_lossy();
 
-            for bin in bins {
-                let bin_path = entry.path().join(bin_name(bin));
-                if bin_path.exists() {
-                    match get_bin_version(&bin_path) {
-                        Ok(v) => say!("- {v}"),
-                        Err(_) => say!("- {bin} (unknown version)"),
+            for repo_entry in fs::read_dir(&owner_path)? {
+                let repo_entry = repo_entry?;
+                let repo_path = repo_entry.path();
+                if !repo_path.is_dir() {
+                    continue;
+                }
+
+                let repo_name = repo_entry.file_name();
+                let repo_name = repo_name.to_string_lossy();
+
+                for version_entry in fs::read_dir(&repo_path)? {
+                    let version_entry = version_entry?;
+                    let version_path = version_entry.path();
+                    if !version_path.is_dir() {
+                        continue;
                     }
+
+                    let version_name = version_entry.file_name();
+                    let version_name = version_name.to_string_lossy();
+
+                    say!("{owner_name}/{repo_name} {version_name}");
+
+                    for bin in bins {
+                        let bin_path = version_path.join(bin_name(bin));
+                        if bin_path.exists() {
+                            match get_bin_version(&bin_path) {
+                                Ok(v) => say!("- {v}"),
+                                Err(_) => say!("- {bin} (unknown version)"),
+                            }
+                        }
+                    }
+                    eprintln!();
                 }
             }
-            eprintln!();
         }
     } else {
         for bin in bins {
@@ -458,11 +491,11 @@ pub(crate) fn list(config: &Config) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn use_version(config: &Config, version: &str) -> Result<()> {
-    let version_dir = config.version_dir(version);
+pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<()> {
+    let version_dir = config.version_dir(repo, version);
 
     if !version_dir.exists() {
-        bail!("version {version} not installed");
+        bail!("version {version} not installed for {repo}");
     }
 
     for bin in config.network.bins {
