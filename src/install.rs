@@ -478,13 +478,10 @@ pub(crate) fn use_version(config: &Config, version: &str) -> Result<()> {
             fs::remove_file(&dest)?;
         }
 
-        fs::copy(&src, &dest)?;
-
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
-        }
+        std::os::unix::fs::symlink(&src, &dest)?;
+        #[cfg(not(unix))]
+        fs::copy(&src, &dest)?;
 
         match get_bin_version(&dest) {
             Ok(v) => say!("use - {v}"),
