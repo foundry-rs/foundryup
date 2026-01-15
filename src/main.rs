@@ -116,7 +116,7 @@ Updating is highly recommended as it gives you access to the latest features and
             );
         }
         Ok(None) => say!("foundryup is up to date."),
-        Err(e) => warn(&format!("Could not check for updates: {e}")),
+        Err(e) => warn!("Could not check for updates: {e}"),
     }
 }
 
@@ -127,6 +127,9 @@ macro_rules! say {
     };
 }
 
-pub fn warn(msg: &str) {
-    eprintln!("foundryup: warning: {msg}");
+#[macro_export]
+macro_rules! warn {
+    ($($arg:tt)*) => {
+        eprintln!("foundryup: warning: {}", format_args!($($arg)*))
+    };
 }

@@ -65,7 +65,7 @@ async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
 
 async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> Result<()> {
     if args.repo.is_some() || args.branch.is_some() || args.version.is_some() {
-        warn("--branch, --install, --use, and --repo arguments are ignored during local install");
+        warn!("--branch, --install, --use, and --repo arguments are ignored during local install");
     }
 
     say!("installing from {}", local_path.display());
@@ -405,19 +405,19 @@ async fn download_manpages(
     let temp_dir = match tempfile::tempdir() {
         Ok(d) => d,
         Err(_) => {
-            warn("skipping manpage download: failed to create temp directory");
+            warn!("skipping manpage download: failed to create temp directory");
             return;
         }
     };
     let archive_path = temp_dir.path().join("foundry_man.tar.gz");
 
     if downloader.download_to_file(&man_url, &archive_path).await.is_err() {
-        warn("skipping manpage download: unavailable or invalid archive");
+        warn!("skipping manpage download: unavailable or invalid archive");
         return;
     }
 
     if let Err(e) = extract_tar_gz(&archive_path, &config.man_dir) {
-        warn(&format!("skipping manpage download: {e}"));
+        warn!("skipping manpage download: {e}");
     }
 }
 
@@ -493,7 +493,7 @@ pub(crate) fn use_version(config: &Config, version: &str) -> Result<()> {
 
         if let Ok(which_path) = which::which(bin) {
             if which_path != dest {
-                warn("");
+                warn!("");
                 eprintln!(
                     r#"There are multiple binaries with the name '{bin}' present in your 'PATH'.
 This may be the result of installing '{bin}' using another method,
