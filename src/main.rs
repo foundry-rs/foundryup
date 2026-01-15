@@ -115,13 +115,16 @@ Updating is highly recommended as it gives you access to the latest features and
                 config::VERSION
             );
         }
-        Ok(None) => say("foundryup is up to date."),
+        Ok(None) => say!("foundryup is up to date."),
         Err(e) => warn(&format!("Could not check for updates: {e}")),
     }
 }
 
-pub fn say(msg: &str) {
-    eprintln!("foundryup: {msg}");
+#[macro_export]
+macro_rules! say {
+    ($($arg:tt)*) => {
+        eprintln!("foundryup: {}", format_args!($($arg)*))
+    };
 }
 
 pub fn warn(msg: &str) {
