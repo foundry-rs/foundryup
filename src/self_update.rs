@@ -10,12 +10,12 @@ use semver::Version;
 use tracing::debug;
 
 pub(crate) async fn run(config: &Config) -> Result<()> {
-    say("checking for updates...");
+    say!("checking for updates...");
 
     let new_version = match check_for_update(config).await {
         Ok(Some(v)) => v,
         Ok(None) => {
-            say(&format!("foundryup is already up to date (installed: {VERSION})"));
+            say!("foundryup is already up to date (installed: {VERSION})");
             return Ok(());
         }
         Err(e) => {
@@ -24,7 +24,7 @@ pub(crate) async fn run(config: &Config) -> Result<()> {
         }
     };
 
-    say(&format!("downloading foundryup v{new_version}..."));
+    say!("downloading foundryup v{new_version}...");
 
     let downloader = Downloader::new()?;
     let target = Target::detect(None, None)?;
@@ -46,7 +46,7 @@ pub(crate) async fn run(config: &Config) -> Result<()> {
         .await
         .wrap_err_with(|| format!("failed to download foundryup v{new_version}"))?;
 
-    say("installing update...");
+    say!("installing update...");
 
     self_replace::self_replace(&temp_path).wrap_err("failed to replace foundryup binary")?;
 
@@ -54,7 +54,7 @@ pub(crate) async fn run(config: &Config) -> Result<()> {
 
     let _ = config;
 
-    say(&format!("successfully updated foundryup: {VERSION} → {new_version}"));
+    say!("successfully updated foundryup: {VERSION} → {new_version}");
 
     Ok(())
 }

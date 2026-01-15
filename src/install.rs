@@ -32,7 +32,7 @@ async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
     let (version, tag) =
         normalize_version(args.version.as_deref().unwrap_or(config.network.default_version));
 
-    say(&format!("installing {} (version {version}, tag {tag})", config.network.display_name));
+    say!("installing {} (version {version}, tag {tag})", config.network.display_name);
 
     let target = Target::detect(args.platform.as_deref(), args.arch.as_deref())?;
     let downloader = Downloader::new()?;
@@ -43,7 +43,7 @@ async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
     let hashes = if config.network.has_attestation && !args.force {
         fetch_and_verify_attestation(config, &downloader, &release_url, &version, &target).await?
     } else if args.force {
-        say("skipped SHA verification due to --force flag");
+        say!("skipped SHA verification due to --force flag");
         None
     } else {
         None
@@ -58,17 +58,17 @@ async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
     download_manpages(config, &downloader, &release_url, &version).await;
 
     use_version(config, &tag)?;
-    say("done!");
+    say!("done!");
 
     Ok(())
 }
 
 async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> Result<()> {
     if args.repo.is_some() || args.branch.is_some() || args.version.is_some() {
-        warn("--branch, --install, --use, and --repo arguments are ignored during local install");
+        warn!("--branch, --install, --use, and --repo arguments are ignored during local install");
     }
 
-    say(&format!("installing from {}", local_path.display()));
+    say!("installing from {}", local_path.display());
 
     let mut cmd = tokio::process::Command::new("cargo");
     cmd.arg("build").arg("--bins").arg("--release").current_dir(local_path);
@@ -97,7 +97,7 @@ async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> R
         fs::copy(&src, &dest)?;
     }
 
-    say("done");
+    say!("done");
     Ok(())
 }
 
@@ -115,7 +115,7 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
         let author_dir = config.foundry_dir.join(author);
         fs::create_dir_all(&author_dir)?;
 
-        say(&format!("cloning {repo}..."));
+        say!("cloning {repo}...");
         let status = tokio::process::Command::new("git")
             .args(["clone", &format!("https://github.com/{repo}")])
             .current_dir(&author_dir)
@@ -126,7 +126,7 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
         }
     }
 
-    say(&format!("fetching {branch}..."));
+    say!("fetching {branch}...");
     let status = tokio::process::Command::new("git")
         .args(["fetch", "origin", &format!("{branch}:remotes/origin/{branch}")])
         .current_dir(&repo_path)
@@ -165,7 +165,7 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
         format!("{author}-branch-{normalized_branch}")
     };
 
-    say(&format!("installing version {version}"));
+    say!("installing version {version}");
 
     let mut cmd = tokio::process::Command::new("cargo");
     cmd.arg("build").arg("--bins").arg("--release").current_dir(&repo_path);
@@ -191,7 +191,7 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
     }
 
     use_version(config, &version)?;
-    say("done");
+    say!("done");
 
     Ok(())
 }
@@ -204,7 +204,7 @@ async fn fetch_and_verify_attestation(
     target: &Target,
 ) -> Result<Option<HashMap<String, String>>> {
     let bins = config.network.bins;
-    say(&format!("checking if {} for {version} version are already installed", bins.join(", ")));
+    say!("checking if {} for {version} version are already installed", bins.join(", "));
 
     let attestation_url = format!(
         "{release_url}foundry_{version}_{platform}_{arch}.attestation.txt",
@@ -216,20 +216,18 @@ async fn fetch_and_verify_attestation(
         Ok(content) => {
             let link = content.lines().next().unwrap_or("").trim().to_string();
             if link.is_empty() || link.contains("Not Found") {
-                say("no attestation found for this release, skipping SHA verification");
+                say!("no attestation found for this release, skipping SHA verification");
                 return Ok(None);
             }
             link
         }
         Err(_) => {
-            say("no attestation found for this release, skipping SHA verification");
+            say!("no attestation found for this release, skipping SHA verification");
             return Ok(None);
         }
     };
 
-    say(&format!(
-        "found attestation for {version} version, downloading attestation artifact, checking..."
-    ));
+    say!("found attestation for {version} version, downloading attestation artifact, checking...");
 
     let artifact_url = format!("{attestation_link}/download");
     let artifact_json = downloader.download_to_string(&artifact_url).await?;
@@ -261,14 +259,14 @@ async fn fetch_and_verify_attestation(
         }
 
         if all_match {
-            say(&format!("version {version} already installed and verified, activating..."));
+            say!("version {version} already installed and verified, activating...");
             use_version(config, version)?;
-            say("done!");
+            say!("done!");
             std::process::exit(0);
         }
     }
 
-    say("binaries not found or do not match expected hashes, downloading new binaries");
+    say!("binaries not found or do not match expected hashes, downloading new binaries");
     Ok(Some(hashes))
 }
 
@@ -314,7 +312,7 @@ async fn download_and_extract(
     );
 
     let archive_url = format!("{release_url}{archive_name}");
-    say(&format!("downloading {archive_name}"));
+    say!("downloading {archive_name}");
 
     let temp_dir = tempfile::tempdir()?;
     let archive_path = temp_dir.path().join(&archive_name);
@@ -350,7 +348,7 @@ fn verify_installed_binaries(
     tag: &str,
     hashes: &HashMap<String, String>,
 ) -> Result<()> {
-    say("verifying downloaded binaries against the attestation file");
+    say!("verifying downloaded binaries against the attestation file");
 
     let version_dir = config.version_dir(tag);
     let mut failed = false;
@@ -362,24 +360,24 @@ fn verify_installed_binaries(
 
         match expected {
             None => {
-                say(&format!("no expected hash for {bin}"));
+                say!("no expected hash for {bin}");
                 failed = true;
             }
             Some(expected_hash) => {
                 if !path.exists() {
-                    say(&format!("binary {bin} not found at {}", path.display()));
+                    say!("binary {bin} not found at {}", path.display());
                     failed = true;
                     continue;
                 }
 
                 let actual = compute_sha256(&path)?;
                 if actual != *expected_hash {
-                    say(&format!("{bin} hash verification failed:"));
-                    say(&format!("  expected: {expected_hash}"));
-                    say(&format!("  actual:   {actual}"));
+                    say!("{bin} hash verification failed:");
+                    say!("  expected: {expected_hash}");
+                    say!("  actual:   {actual}");
                     failed = true;
                 } else {
-                    say(&format!("{bin} verified ✓"));
+                    say!("{bin} verified ✓");
                 }
             }
         }
@@ -402,24 +400,24 @@ async fn download_manpages(
         "{release_url}{prefix}_man_{version}.tar.gz",
         prefix = config.network.archive_prefix
     );
-    say("downloading manpages");
+    say!("downloading manpages");
 
     let temp_dir = match tempfile::tempdir() {
         Ok(d) => d,
         Err(_) => {
-            warn("skipping manpage download: failed to create temp directory");
+            warn!("skipping manpage download: failed to create temp directory");
             return;
         }
     };
     let archive_path = temp_dir.path().join("foundry_man.tar.gz");
 
     if downloader.download_to_file(&man_url, &archive_path).await.is_err() {
-        warn("skipping manpage download: unavailable or invalid archive");
+        warn!("skipping manpage download: unavailable or invalid archive");
         return;
     }
 
     if let Err(e) = extract_tar_gz(&archive_path, &config.man_dir) {
-        warn(&format!("skipping manpage download: {e}"));
+        warn!("skipping manpage download: {e}");
     }
 }
 
@@ -432,14 +430,14 @@ pub(crate) fn list(config: &Config) -> Result<()> {
             let version_name = entry.file_name();
             let version_name = version_name.to_string_lossy();
 
-            say(&version_name);
+            say!("{version_name}");
 
             for bin in bins {
                 let bin_path = entry.path().join(bin_name(bin));
                 if bin_path.exists() {
                     match get_bin_version(&bin_path) {
-                        Ok(v) => say(&format!("- {v}")),
-                        Err(_) => say(&format!("- {bin} (unknown version)")),
+                        Ok(v) => say!("- {v}"),
+                        Err(_) => say!("- {bin} (unknown version)"),
                     }
                 }
             }
@@ -450,8 +448,8 @@ pub(crate) fn list(config: &Config) -> Result<()> {
             let bin_path = config.bin_path(bin);
             if bin_path.exists() {
                 match get_bin_version(&bin_path) {
-                    Ok(v) => say(&format!("- {v}")),
-                    Err(_) => say(&format!("- {bin} (unknown version)")),
+                    Ok(v) => say!("- {v}"),
+                    Err(_) => say!("- {bin} (unknown version)"),
                 }
             }
         }
@@ -489,13 +487,13 @@ pub(crate) fn use_version(config: &Config, version: &str) -> Result<()> {
         }
 
         match get_bin_version(&dest) {
-            Ok(v) => say(&format!("use - {v}")),
-            Err(_) => say(&format!("use - {bin}")),
+            Ok(v) => say!("use - {v}"),
+            Err(_) => say!("use - {bin}"),
         }
 
         if let Ok(which_path) = which::which(bin) {
             if which_path != dest {
-                warn("");
+                warn!("");
                 eprintln!(
                     r#"There are multiple binaries with the name '{bin}' present in your 'PATH'.
 This may be the result of installing '{bin}' using another method,
