@@ -20,20 +20,18 @@ jobs:
             target: x86_64-unknown-linux-gnu
             platform: linux
             arch: amd64
-          # TODO: not enabled for private repositories
-          # - os: ubuntu-latest-arm
-          #   target: aarch64-unknown-linux-gnu
-          #   platform: linux
-          #   arch: arm64
+          - os: ubuntu-latest-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux
+            arch: arm64
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             platform: alpine
             arch: amd64
-          # TODO: not enabled for private repositories
-          # - os: ubuntu-latest-arm
-          #   target: aarch64-unknown-linux-musl
-          #   platform: alpine
-          #   arch: arm64
+          - os: ubuntu-latest-arm
+            target: aarch64-unknown-linux-musl
+            platform: alpine
+            arch: arm64
           - os: macos-14
             target: x86_64-apple-darwin
             platform: darwin
