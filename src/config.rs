@@ -51,8 +51,8 @@ impl Config {
         Ok(())
     }
 
-    pub(crate) fn version_dir(&self, version: &str) -> PathBuf {
-        self.versions_dir.join(version)
+    pub(crate) fn version_dir(&self, repo: &str, version: &str) -> PathBuf {
+        self.versions_dir.join(repo).join(version)
     }
 
     pub(crate) fn bin_path(&self, name: &str) -> PathBuf {

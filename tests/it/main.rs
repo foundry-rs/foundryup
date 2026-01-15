@@ -176,11 +176,12 @@ fn test_install(version: &str) {
 
     foundryup().env("FOUNDRY_DIR", &foundry_dir).arg("--list").assert().success().stderr_eq(str![
         [r#"
-...
+foundryup: foundry-rs/foundry [..]
 foundryup: - forge [..]
 foundryup: - cast [..]
 foundryup: - anvil [..]
 foundryup: - chisel [..]
+
 ...
 "#]
     ]);
