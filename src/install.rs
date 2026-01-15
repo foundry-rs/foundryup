@@ -482,7 +482,7 @@ pub(crate) fn use_version(config: &Config, version: &str) -> Result<()> {
 
         #[cfg(unix)]
         std::os::unix::fs::symlink(&src, &dest)?;
-        #[cfg(windows)]
+        #[cfg(not(unix))]
         fs::copy(&src, &dest)?;
 
         match get_bin_version(&dest) {
