@@ -13,9 +13,9 @@ pub(crate) fn check_bins_in_use(config: &Config) -> Result<()> {
             && let Some(exe_fname) = exe_fname.to_str()
             && let Some(bin) = bins.iter().find(|&&bin| exe_fname.starts_with(bin))
         {
-            warn(&format!(
+            warn!(
                 "'{bin}' is currently running (PID: {pid}), please stop the process and try again"
-            ));
+            );
         }
     }
 
