@@ -152,6 +152,41 @@ fn list_empty() {
         .success();
 }
 
+#[test]
+fn migrate_legacy_versions() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+    let versions_dir = foundry_dir.join("versions");
+
+    std::fs::create_dir_all(versions_dir.join("nightly")).unwrap();
+    std::fs::create_dir_all(versions_dir.join("stable")).unwrap();
+
+    for version in ["nightly", "stable"] {
+        for bin in BINS {
+            let bin_path = versions_dir.join(version).join(format!("{bin}{EXE_SUFFIX}"));
+            std::fs::write(&bin_path, "fake binary").unwrap();
+        }
+    }
+
+    assert!(versions_dir.join("nightly").exists());
+    assert!(versions_dir.join("stable").exists());
+
+    foundryup().env("FOUNDRY_DIR", &foundry_dir).arg("--list").assert().success().stderr_eq(str![
+        [r#"
+...
+foundryup: migrating legacy version [..]
+...
+foundryup: migrating legacy version [..]
+...
+"#]
+    ]);
+
+    assert!(!versions_dir.join("nightly").exists());
+    assert!(!versions_dir.join("stable").exists());
+    assert!(versions_dir.join("foundry-rs/foundry/nightly").exists());
+    assert!(versions_dir.join("foundry-rs/foundry/stable").exists());
+}
+
 fn test_install(version: &str) {
     let temp_dir = tempfile::Builder::new().tempdir().unwrap();
     let foundry_dir = temp_dir.path().join(".foundry");

@@ -1,7 +1,7 @@
-use crate::cli::Network;
+use crate::{cli::Network, say};
 use eyre::Result;
 use fs_err as fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -49,6 +49,69 @@ impl Config {
         fs::create_dir_all(&self.bin_dir)?;
         fs::create_dir_all(&self.man_dir)?;
         Ok(())
+    }
+
+    pub(crate) fn migrate_legacy_versions(&self) -> Result<()> {
+        if !self.versions_dir.exists() {
+            return Ok(());
+        }
+
+        let default_repo = NetworkConfig::FOUNDRY.repo;
+
+        for entry in fs::read_dir(&self.versions_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if !path.is_dir() {
+                continue;
+            }
+
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+
+            if name.contains('/') || self.is_owner_dir(&path) {
+                continue;
+            }
+
+            if self.is_legacy_version_dir(&path) {
+                let new_path = self.version_dir(default_repo, &name);
+                fs::create_dir_all(new_path.parent().unwrap())?;
+                say(&format!("migrating legacy version '{name}' to {default_repo}/{name}"));
+                fs::rename(&path, &new_path)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn is_legacy_version_dir(&self, path: &Path) -> bool {
+        for bin in NetworkConfig::FOUNDRY.bins {
+            let bin_name = if cfg!(windows) { format!("{bin}.exe") } else { bin.to_string() };
+            if path.join(&bin_name).exists() {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_owner_dir(&self, path: &Path) -> bool {
+        for entry in fs::read_dir(path).into_iter().flatten().flatten() {
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                for sub_entry in fs::read_dir(&entry_path).into_iter().flatten().flatten() {
+                    if sub_entry.path().is_dir() {
+                        for bin in NetworkConfig::FOUNDRY.bins {
+                            let bin_name =
+                                if cfg!(windows) { format!("{bin}.exe") } else { bin.to_string() };
+                            if sub_entry.path().join(&bin_name).exists() {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     pub(crate) fn version_dir(&self, repo: &str, version: &str) -> PathBuf {

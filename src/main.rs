@@ -50,6 +50,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
 
     let config = Arc::new(Config::new(cli.network)?);
+    config.migrate_legacy_versions()?;
 
     if cli.update {
         return self_update::run(&config).await;
