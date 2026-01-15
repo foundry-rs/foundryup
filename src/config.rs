@@ -95,23 +95,15 @@ impl Config {
     }
 
     fn is_owner_dir(&self, path: &Path) -> bool {
-        for entry in fs::read_dir(path).into_iter().flatten().flatten() {
-            let entry_path = entry.path();
-            if entry_path.is_dir() {
-                for sub_entry in fs::read_dir(&entry_path).into_iter().flatten().flatten() {
-                    if sub_entry.path().is_dir() {
-                        for bin in NetworkConfig::FOUNDRY.bins {
-                            let bin_name =
-                                if cfg!(windows) { format!("{bin}.exe") } else { bin.to_string() };
-                            if sub_entry.path().join(&bin_name).exists() {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
+        // Owner dirs have repo subdirs, which have version subdirs.
+        fn has_dir(path: &Path, mut f: impl FnMut(&Path) -> bool) -> bool {
+            fs::read_dir(path)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|entry| f(&entry.path()) && entry.metadata().is_ok_and(|m| m.is_dir()))
         }
-        false
+        has_dir(path, |p| has_dir(p, |_| true))
     }
 
     pub(crate) fn version_dir(&self, repo: &str, version: &str) -> PathBuf {
