@@ -1,5 +1,7 @@
 name: Release
 
+permissions: {}
+
 on:
   push:
     tags:
@@ -10,6 +12,10 @@ env:
 
 jobs:
   build:
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -74,21 +80,42 @@ jobs:
         run: cargo build --profile dist --target ${{ matrix.target }}
 
       - name: Prepare artifact
+        id: artifacts
         shell: bash
         run: |
           if [[ "${{ matrix.platform }}" == "win32" ]]; then
             exe=".exe"
           fi
-          cp target/${{ matrix.target }}/dist/foundryup${exe} foundryup_${{ matrix.platform }}_${{ matrix.arch }}
+          bin_name="foundryup_${{ matrix.platform }}_${{ matrix.arch }}${exe}"
+          cp target/${{ matrix.target }}/dist/foundryup${exe} "$bin_name"
+          printf 'bin_name=%s\n' "$bin_name" >> "$GITHUB_OUTPUT"
+          printf 'attestation_file=%s\n' "foundryup_${{ matrix.platform }}_${{ matrix.arch }}.attestation.txt" >> "$GITHUB_OUTPUT"
+
+      - name: Generate attestation
+        id: attestation
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ steps.artifacts.outputs.bin_name }}
+
+      - name: Record attestation URL
+        env:
+          ATTESTATION_URL: ${{ steps.attestation.outputs.attestation-url }}
+          ATTESTATION_FILE: ${{ steps.artifacts.outputs.attestation_file }}
+        shell: bash
+        run: printf '%s\n' "$ATTESTATION_URL" > "$ATTESTATION_FILE"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
           name: foundryup_${{ matrix.platform }}_${{ matrix.arch }}
-          path: foundryup_${{ matrix.platform }}_${{ matrix.arch }}
+          path: |
+            ${{ steps.artifacts.outputs.bin_name }}
+            ${{ steps.artifacts.outputs.attestation_file }}
           if-no-files-found: error
 
   release:
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     needs: build
     timeout-minutes: 30
