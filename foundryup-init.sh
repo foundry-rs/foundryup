@@ -20,7 +20,9 @@ has_local 2>/dev/null || alias local=typeset
 set -u
 
 FOUNDRYUP_REPO="foundry-rs/foundryup"
-FOUNDRYUP_BIN_DIR="${FOUNDRY_DIR:-$HOME/.foundry}/bin"
+BASE_DIR="${XDG_CONFIG_HOME:-$HOME}"
+FOUNDRY_DIR="${FOUNDRY_DIR:-$BASE_DIR/.foundry}"
+FOUNDRYUP_BIN_DIR="$FOUNDRY_DIR/bin"
 
 usage() {
     cat <<EOF
@@ -33,7 +35,7 @@ Usage: foundryup-init.sh [OPTIONS]
 Options:
   -v, --verbose   Enable verbose output
   -q, --quiet     Disable progress output
-  -y              Skip confirmation prompt
+  -y, --yes       Skip confirmation prompt
   -h, --help      Print help
   -V, --version   Print version
 
@@ -80,7 +82,7 @@ main() {
                 _quiet=yes
                 _passthrough_args="$_passthrough_args $arg"
                 ;;
-            -y)
+            -y|--yes)
                 _need_tty=no
                 _passthrough_args="$_passthrough_args $arg"
                 ;;
