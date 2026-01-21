@@ -17,7 +17,7 @@ has_local() {
 
 has_local 2>/dev/null || alias local=typeset
 
-set -u
+set -eo pipefail
 
 FOUNDRYUP_REPO="foundry-rs/foundryup"
 BASE_DIR="${XDG_CONFIG_HOME:-$HOME}"
