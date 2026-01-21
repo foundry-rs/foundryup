@@ -1,8 +1,23 @@
 #!/bin/sh
-set -eu
+# shellcheck shell=dash
+# shellcheck disable=SC2039  # local is non-POSIX
 
 # This script downloads and installs foundryup, the Foundry toolchain manager.
 # It detects the platform, downloads the appropriate binary, and runs it.
+
+# It runs on Unix shells like {a,ba,da,k,z}sh. It uses the common `local`
+# extension. Note: Most shells limit `local` to 1 var per line, contra bash.
+
+# Some versions of ksh have no `local` keyword. Alias it to `typeset`, but
+# beware this makes variables global with f()-style function syntax in ksh93.
+has_local() {
+    # shellcheck disable=SC2034  # deliberately unused
+    local _has_local
+}
+
+has_local 2>/dev/null || alias local=typeset
+
+set -eu
 
 FOUNDRYUP_REPO="foundry-rs/foundryup"
 BASE_DIR="${XDG_CONFIG_HOME:-$HOME}"
