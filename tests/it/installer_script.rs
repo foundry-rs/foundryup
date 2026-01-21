@@ -8,7 +8,7 @@ fn script_without_main() -> String {
 fn run_script_function(function_body: &str) -> std::process::Output {
     let script = script_without_main();
     let full_script = format!("{script}\n\n{function_body}");
-    Command::new("sh")
+    Command::new("bash")
         .arg("-c")
         .arg(&full_script)
         .stdout(Stdio::piped())
@@ -35,7 +35,7 @@ fn script_usage_works() {
 
 #[test]
 fn script_help_flag() {
-    let output = Command::new("sh")
+    let output = Command::new("bash")
         .args(["foundryup-init.sh", "--help"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdout(Stdio::piped())
@@ -50,7 +50,7 @@ fn script_help_flag() {
 #[test]
 fn script_get_architecture_linux_amd64() {
     let script = script_without_main();
-    let output = Command::new("sh")
+    let output = Command::new("bash")
         .args([
             "-c",
             &format!(
@@ -79,7 +79,7 @@ echo "$RETVAL"
 #[test]
 fn script_get_architecture_darwin_arm64() {
     let script = script_without_main();
-    let output = Command::new("sh")
+    let output = Command::new("bash")
         .args([
             "-c",
             &format!(
@@ -107,7 +107,7 @@ echo "$RETVAL"
 #[test]
 fn script_get_architecture_alpine() {
     let script = script_without_main();
-    let output = Command::new("sh")
+    let output = Command::new("bash")
         .args([
             "-c",
             &format!(
@@ -136,7 +136,7 @@ echo "$RETVAL"
 #[test]
 fn script_get_architecture_windows() {
     let script = script_without_main();
-    let output = Command::new("sh")
+    let output = Command::new("bash")
         .args([
             "-c",
             &format!(
@@ -253,7 +253,7 @@ fn script_foundryup_repo_defined() {
 #[test]
 fn script_foundryup_bin_dir_default() {
     let script = script_without_main();
-    let output = Command::new("sh")
+    let output = Command::new("bash")
         .args([
             "-c",
             &format!(
@@ -277,7 +277,7 @@ echo "$FOUNDRYUP_BIN_DIR"
 #[test]
 fn script_foundryup_bin_dir_custom() {
     let script = script_without_main();
-    let output = Command::new("sh")
+    let output = Command::new("bash")
         .args([
             "-c",
             &format!(
@@ -304,7 +304,7 @@ fn script_downloads_foundryup() {
     let bin_dir = temp_dir.join("bin");
     let foundryup_path = bin_dir.join("foundryup");
 
-    let output = Command::new("sh")
+    let output = Command::new("bash")
         .args(["foundryup-init.sh", "-y"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("FOUNDRY_DIR", &temp_dir)
