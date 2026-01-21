@@ -3,22 +3,22 @@ use std::process::{Command, Stdio};
 fn script_without_main() -> String {
     let script = include_str!("../../foundryup-init.sh");
     script
+        // Normalize CRLF to LF (Windows git checkout may add CR)
+        .replace("\r\n", "\n")
+        .replace('\r', "")
         .replace("main \"$@\" || exit 1", "")
         // Remove strict error handling for function tests to avoid platform differences
         .replace("set -eo pipefail", "set -e")
 }
 
-/// Returns the bash command to use. On Windows, uses Git Bash.
-fn bash_cmd() -> Command {
+/// Returns the shell command to use.
+/// On Windows, uses `sh` (Git's POSIX shell) since we strip pipefail for tests.
+/// On Unix, uses `bash` to match the script's shebang.
+fn shell_cmd() -> Command {
     #[cfg(windows)]
     {
-        // Git Bash location on Windows
-        let git_bash = r"C:\Program Files\Git\bin\bash.exe";
-        if std::path::Path::new(git_bash).exists() {
-            return Command::new(git_bash);
-        }
-        // Fallback
-        Command::new("bash")
+        // Use sh on Windows - it's Git's POSIX shell and handles the script better
+        Command::new("sh")
     }
     #[cfg(not(windows))]
     {
@@ -29,7 +29,7 @@ fn bash_cmd() -> Command {
 fn run_script_function(function_body: &str) -> std::process::Output {
     let script = script_without_main();
     let full_script = format!("{script}\n\n{function_body}");
-    bash_cmd()
+    shell_cmd()
         .arg("-c")
         .arg(&full_script)
         .stdout(Stdio::piped())
@@ -56,7 +56,7 @@ fn script_usage_works() {
 
 #[test]
 fn script_help_flag() {
-    let output = bash_cmd()
+    let output = shell_cmd()
         .args(["foundryup-init.sh", "--help"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdout(Stdio::piped())
@@ -71,7 +71,7 @@ fn script_help_flag() {
 #[test]
 fn script_get_architecture_linux_amd64() {
     let script = script_without_main();
-    let output = bash_cmd()
+    let output = shell_cmd()
         .args([
             "-c",
             &format!(
@@ -100,7 +100,7 @@ echo "$RETVAL"
 #[test]
 fn script_get_architecture_darwin_arm64() {
     let script = script_without_main();
-    let output = bash_cmd()
+    let output = shell_cmd()
         .args([
             "-c",
             &format!(
@@ -128,7 +128,7 @@ echo "$RETVAL"
 #[test]
 fn script_get_architecture_alpine() {
     let script = script_without_main();
-    let output = bash_cmd()
+    let output = shell_cmd()
         .args([
             "-c",
             &format!(
@@ -157,7 +157,7 @@ echo "$RETVAL"
 #[test]
 fn script_get_architecture_windows() {
     let script = script_without_main();
-    let output = bash_cmd()
+    let output = shell_cmd()
         .args([
             "-c",
             &format!(
@@ -288,7 +288,7 @@ fn script_foundryup_repo_defined() {
 #[test]
 fn script_foundryup_bin_dir_default() {
     let script = script_without_main();
-    let output = bash_cmd()
+    let output = shell_cmd()
         .args([
             "-c",
             &format!(
@@ -312,7 +312,7 @@ echo "$FOUNDRYUP_BIN_DIR"
 #[test]
 fn script_foundryup_bin_dir_custom() {
     let script = script_without_main();
-    let output = bash_cmd()
+    let output = shell_cmd()
         .args([
             "-c",
             &format!(
@@ -339,7 +339,7 @@ fn script_downloads_foundryup() {
     let bin_dir = temp_dir.join("bin");
     let foundryup_path = bin_dir.join("foundryup");
 
-    let output = bash_cmd()
+    let output = shell_cmd()
         .args(["foundryup-init.sh", "-y"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("FOUNDRY_DIR", &temp_dir)
