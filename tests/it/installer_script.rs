@@ -313,3 +313,164 @@ fn script_downloads_foundryup() {
 
     std::fs::remove_dir_all(&temp_dir).ok();
 }
+
+#[test]
+fn script_compute_sha256_known_value() {
+    let output = run_script_function(
+        r#"
+echo -n "hello" > /tmp/sha_test_file
+hash=$(compute_sha256 /tmp/sha_test_file)
+rm -f /tmp/sha_test_file
+echo "$hash"
+"#,
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_eq!(
+        stdout, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "compute_sha256 should match known SHA256 of 'hello'"
+    );
+}
+
+#[test]
+fn script_compute_sha256_format() {
+    let output = run_script_function(
+        r#"
+echo -n "test" > /tmp/sha_format_test
+hash=$(compute_sha256 /tmp/sha_format_test)
+rm -f /tmp/sha_format_test
+
+# Check length is 64 and format is hex
+if [ "${#hash}" -eq 64 ] && printf '%s' "$hash" | grep -qE '^[a-fA-F0-9]{64}$'; then
+    echo "format_ok"
+else
+    echo "format_bad: $hash"
+fi
+"#,
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("format_ok"), "SHA256 should be 64 hex characters");
+}
+
+#[test]
+fn script_try_download_success() {
+    let output = run_script_function(
+        r#"
+if try_download "https://github.com" /tmp/try_download_test; then
+    echo "download_ok"
+    rm -f /tmp/try_download_test
+else
+    echo "download_failed"
+fi
+"#,
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("download_ok"), "try_download should succeed for valid URL");
+}
+
+#[test]
+fn script_try_download_failure_no_exit() {
+    let output = run_script_function(
+        r#"
+if try_download "https://github.com/nonexistent-404-page-xyz" /tmp/try_download_fail; then
+    echo "unexpected_success"
+else
+    echo "graceful_failure"
+fi
+"#,
+    );
+    assert!(output.status.success(), "script should not exit on try_download failure");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("graceful_failure"),
+        "try_download should return false without exiting"
+    );
+}
+
+#[test]
+fn script_force_flag_documented() {
+    let output = Command::new("sh")
+        .args(["foundryup-init.sh", "--help"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("-f, --force") && stdout.contains("attestation"),
+        "help should document --force flag for skipping attestation"
+    );
+}
+
+#[test]
+fn script_downloads_with_attestation_verification() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("foundryup-attest-test-{}", std::process::id()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let bin_dir = temp_dir.join("bin");
+    let foundryup_path = bin_dir.join("foundryup");
+
+    let output = Command::new("sh")
+        .args(["foundryup-init.sh", "-y"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("FOUNDRY_DIR", &temp_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "script failed:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(foundryup_path.exists(), "foundryup binary should be installed");
+
+    let combined = format!("{stdout}{stderr}");
+    let attestation_attempted = combined.contains("downloading attestation")
+        || combined.contains("verifying attestation")
+        || combined.contains("binary verified")
+        || combined.contains("no attestation found");
+    assert!(
+        attestation_attempted,
+        "attestation verification should be attempted. Output: {combined}"
+    );
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn script_downloads_with_force_skips_attestation() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("foundryup-force-test-{}", std::process::id()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let output = Command::new("sh")
+        .args(["foundryup-init.sh", "-y", "--force"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("FOUNDRY_DIR", &temp_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "script failed:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("skipping attestation verification"),
+        "--force should skip attestation. Output: {combined}"
+    );
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
