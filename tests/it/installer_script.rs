@@ -9,31 +9,16 @@ fn script_without_main() -> String {
         .replace("main \"$@\" || exit 1", "")
 }
 
-/// Returns the shell command to use.
-fn shell_cmd() -> Command {
+fn run_script_function(function_body: &str) -> std::process::Output {
+    let script = script_without_main();
+    let full_script = format!("{script}\n\n{function_body}");
     Command::new("sh")
-}
-
-/// Run a script via temp file to avoid shell argument parsing issues on Windows
-fn run_script(script: &str) -> std::process::Output {
-    use std::io::Write;
-
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(script.as_bytes()).unwrap();
-    temp_file.flush().unwrap();
-
-    shell_cmd()
-        .arg(temp_file.path())
+        .arg("-c")
+        .arg(&full_script)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
         .unwrap()
-}
-
-fn run_script_function(function_body: &str) -> std::process::Output {
-    let script = script_without_main();
-    let full_script = format!("{script}\n\n{function_body}");
-    run_script(&full_script)
 }
 
 #[test]
@@ -54,7 +39,7 @@ fn script_usage_works() {
 
 #[test]
 fn script_help_flag() {
-    let output = shell_cmd()
+    let output = Command::new("sh")
         .args(["foundryup-init.sh", "--help"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdout(Stdio::piped())
@@ -83,7 +68,13 @@ get_architecture
 echo "$RETVAL"
 "#
     );
-    let output = run_script(&full_script);
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&full_script)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert_eq!(stdout, "linux_amd64");
 }
@@ -104,7 +95,13 @@ get_architecture
 echo "$RETVAL"
 "#
     );
-    let output = run_script(&full_script);
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&full_script)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert_eq!(stdout, "darwin_arm64");
 }
@@ -126,7 +123,13 @@ get_architecture
 echo "$RETVAL"
 "#
     );
-    let output = run_script(&full_script);
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&full_script)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert_eq!(stdout, "alpine_amd64");
 }
@@ -147,7 +150,13 @@ get_architecture
 echo "$RETVAL"
 "#
     );
-    let output = run_script(&full_script);
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&full_script)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert_eq!(stdout, "win32_amd64");
 }
@@ -267,7 +276,13 @@ HOME=/tmp/test_home
 echo "$FOUNDRYUP_BIN_DIR"
 "#
     );
-    let output = run_script(&full_script);
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&full_script)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("/tmp/test_home/.foundry/bin"));
 }
@@ -282,7 +297,13 @@ FOUNDRY_DIR=/custom/path
 echo "$FOUNDRYUP_BIN_DIR"
 "#
     );
-    let output = run_script(&full_script);
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&full_script)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("/custom/path/bin"));
 }
@@ -295,7 +316,7 @@ fn script_downloads_foundryup() {
     let bin_dir = temp_dir.join("bin");
     let foundryup_path = bin_dir.join("foundryup");
 
-    let output = shell_cmd()
+    let output = Command::new("sh")
         .args(["foundryup-init.sh", "-y"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("FOUNDRY_DIR", &temp_dir)
