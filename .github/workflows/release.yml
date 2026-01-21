@@ -82,7 +82,7 @@ jobs:
           cp target/${{ matrix.target }}/dist/foundryup${exe} foundryup_${{ matrix.platform }}_${{ matrix.arch }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: foundryup_${{ matrix.platform }}_${{ matrix.arch }}
           path: foundryup_${{ matrix.platform }}_${{ matrix.arch }}
