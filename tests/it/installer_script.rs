@@ -1,20 +1,27 @@
-use std::process::{Command, Stdio};
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
+
+fn normalize_line_endings(s: &str) -> String {
+    s.replace("\r\n", "\n").replace('\r', "")
+}
 
 fn script_without_main() -> String {
     let script = include_str!("../../foundryup-init.sh");
-    script
-        // Normalize CRLF to LF (Windows git checkout may add CR)
-        .replace("\r\n", "\n")
-        .replace('\r', "")
-        .replace("main \"$@\" || exit 1", "")
+    normalize_line_endings(script).replace("main \"$@\" || exit 1", "")
 }
 
 fn run_script_function(function_body: &str) -> std::process::Output {
     let script = script_without_main();
-    let full_script = format!("{script}\n\n{function_body}");
+    let full_script = format!("{script}\n\n{}", normalize_line_endings(function_body));
+
+    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+    temp_file.write_all(full_script.as_bytes()).unwrap();
+    temp_file.flush().unwrap();
+
     Command::new("sh")
-        .arg("-c")
-        .arg(&full_script)
+        .arg(temp_file.path())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
