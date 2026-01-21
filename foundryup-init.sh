@@ -23,7 +23,7 @@ FOUNDRYUP_REPO="foundry-rs/foundryup"
 BASE_DIR="${XDG_CONFIG_HOME:-$HOME}"
 FOUNDRY_DIR="${FOUNDRY_DIR:-$BASE_DIR/.foundry}"
 FOUNDRYUP_BIN_DIR="$FOUNDRY_DIR/bin"
-FOUNDRYUP_SKIP_VERIFY="${FOUNDRYUP_SKIP_VERIFY:-false}"
+FOUNDRYUP_IGNORE_VERIFICATION="${FOUNDRYUP_IGNORE_VERIFICATION:-false}"
 
 usage() {
     cat <<EOF
@@ -45,7 +45,7 @@ All other options are passed to foundryup after installation.
 
 Environment variables:
   FOUNDRYUP_VERSION      Install a specific version of foundryup
-  FOUNDRYUP_SKIP_VERIFY  Skip attestation verification if set to "true"
+  FOUNDRYUP_IGNORE_VERIFICATION  Skip attestation verification if set to "true"
 EOF
 }
 
@@ -86,7 +86,7 @@ main() {
                 _passthrough_args="$_passthrough_args $arg"
                 ;;
             -f|--force)
-                FOUNDRYUP_SKIP_VERIFY=true
+                FOUNDRYUP_IGNORE_VERIFICATION=true
                 ;;
             -y|--yes)
                 _need_tty=no
@@ -127,8 +127,8 @@ main() {
     local _expected_hash=""
 
     # Download attestation and extract expected hash (unless skipping verification)
-    if [ "$FOUNDRYUP_SKIP_VERIFY" = "true" ]; then
-        say "skipping attestation verification (--force or FOUNDRYUP_SKIP_VERIFY set)"
+    if [ "$FOUNDRYUP_IGNORE_VERIFICATION" = "true" ]; then
+        say "skipping attestation verification (--force or FOUNDRYUP_IGNORE_VERIFICATION set)"
     else
         say "downloading attestation..."
         # Use curl/wget directly to avoid the downloader's exit-on-404 behavior
