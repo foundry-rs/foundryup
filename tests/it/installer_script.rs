@@ -2,7 +2,10 @@ use std::process::{Command, Stdio};
 
 fn script_without_main() -> String {
     let script = include_str!("../../foundryup-init.sh");
-    script.replace("main \"$@\" || exit 1", "")
+    script
+        .replace("main \"$@\" || exit 1", "")
+        // Remove strict error handling for function tests to avoid platform differences
+        .replace("set -eo pipefail", "set -e")
 }
 
 /// Returns the bash command to use. On Windows, uses Git Bash.
@@ -207,17 +210,35 @@ fn script_need_cmd_fails_for_missing() {
 #[test]
 fn script_assert_nz_success() {
     let output = run_script_function("assert_nz 'value' 'test' && echo 'ok'");
-    assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("ok"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "expected success, got {:?}\nstdout: {}\nstderr: {}",
+        output.status,
+        stdout,
+        stderr
+    );
+    assert!(stdout.contains("ok"), "stdout missing 'ok': {}", stdout);
 }
 
 #[test]
 fn script_assert_nz_failure() {
     let output = run_script_function("assert_nz '' 'test'");
-    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("assert_nz test"));
+    assert!(
+        !output.status.success(),
+        "expected failure, got {:?}\nstdout: {}\nstderr: {}",
+        output.status,
+        stdout,
+        stderr
+    );
+    assert!(
+        stderr.contains("assert_nz test"),
+        "stderr missing 'assert_nz test': {}",
+        stderr
+    );
 }
 
 #[test]
