@@ -259,6 +259,7 @@ fn script_foundryup_bin_dir_default() {
             &format!(
                 r#"
 unset FOUNDRY_DIR
+unset XDG_CONFIG_HOME
 HOME=/tmp/test_home
 {script}
 echo "$FOUNDRYUP_BIN_DIR"
