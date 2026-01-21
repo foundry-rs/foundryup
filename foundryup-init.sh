@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -eo pipefail
+#!/bin/sh
+set -eu
 
 # This script downloads and installs foundryup, the Foundry toolchain manager.
 # It detects the platform, downloads the appropriate binary, and runs it.

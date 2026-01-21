@@ -7,23 +7,11 @@ fn script_without_main() -> String {
         .replace("\r\n", "\n")
         .replace('\r', "")
         .replace("main \"$@\" || exit 1", "")
-        // Remove strict error handling for function tests to avoid platform differences
-        .replace("set -eo pipefail", "set -e")
 }
 
 /// Returns the shell command to use.
-/// On Windows, uses `sh` (Git's POSIX shell) since we strip pipefail for tests.
-/// On Unix, uses `bash` to match the script's shebang.
 fn shell_cmd() -> Command {
-    #[cfg(windows)]
-    {
-        // Use sh on Windows - it's Git's POSIX shell and handles the script better
-        Command::new("sh")
-    }
-    #[cfg(not(windows))]
-    {
-        Command::new("bash")
-    }
+    Command::new("sh")
 }
 
 /// Run a script via temp file to avoid shell argument parsing issues on Windows
@@ -51,7 +39,7 @@ fn run_script_function(function_body: &str) -> std::process::Output {
 #[test]
 fn script_has_shebang() {
     let script = include_str!("../../foundryup-init.sh");
-    assert!(script.starts_with("#!/usr/bin/env bash"), "script should start with shebang");
+    assert!(script.starts_with("#!/bin/sh"), "script should start with shebang");
 }
 
 #[test]
