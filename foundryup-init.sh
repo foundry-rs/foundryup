@@ -187,9 +187,8 @@ Use --force to skip verification (INSECURE)"
     ensure chmod u+x "$_file"
 
     if [ ! -x "$_file" ]; then
-        err "cannot execute $_file (likely because of mounting /tmp as noexec)."
-        err "please copy the file to a location where you can execute binaries and run ./foundryup"
-        exit 1
+        err "cannot execute $_file (likely because of mounting /tmp as noexec).
+please copy the file to a location where you can execute binaries and run ./foundryup"
     fi
 
     say "installing foundryup to $FOUNDRYUP_BIN_DIR..."
@@ -247,7 +246,6 @@ get_architecture() {
             ;;
         *)
             err "unsupported OS: $_ostype"
-            exit 1
             ;;
     esac
 
@@ -265,7 +263,6 @@ get_architecture() {
             ;;
         *)
             err "unsupported architecture: $_cputype"
-            exit 1
             ;;
     esac
 
