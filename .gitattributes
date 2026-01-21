@@ -1,0 +1,3 @@
+# Ensure consistent line endings across platforms
+*.rs text eol=lf
+*.sh text eol=lf
