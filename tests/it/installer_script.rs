@@ -54,8 +54,11 @@ fn script_help_flag() {
 #[test]
 fn script_get_architecture_linux_amd64() {
     let script = script_without_main();
-    let full_script = format!(
-        r#"
+    let output = Command::new("sh")
+        .args([
+            "-c",
+            &format!(
+                r#"
 {script}
 uname() {{
     case "$1" in
@@ -67,10 +70,8 @@ is_musl() {{ return 1; }}
 get_architecture
 echo "$RETVAL"
 "#
-    );
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(&full_script)
+            ),
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -82,8 +83,11 @@ echo "$RETVAL"
 #[test]
 fn script_get_architecture_darwin_arm64() {
     let script = script_without_main();
-    let full_script = format!(
-        r#"
+    let output = Command::new("sh")
+        .args([
+            "-c",
+            &format!(
+                r#"
 {script}
 uname() {{
     case "$1" in
@@ -94,10 +98,8 @@ uname() {{
 get_architecture
 echo "$RETVAL"
 "#
-    );
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(&full_script)
+            ),
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -109,8 +111,11 @@ echo "$RETVAL"
 #[test]
 fn script_get_architecture_alpine() {
     let script = script_without_main();
-    let full_script = format!(
-        r#"
+    let output = Command::new("sh")
+        .args([
+            "-c",
+            &format!(
+                r#"
 {script}
 uname() {{
     case "$1" in
@@ -122,10 +127,8 @@ is_musl() {{ return 0; }}
 get_architecture
 echo "$RETVAL"
 "#
-    );
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(&full_script)
+            ),
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -137,8 +140,11 @@ echo "$RETVAL"
 #[test]
 fn script_get_architecture_windows() {
     let script = script_without_main();
-    let full_script = format!(
-        r#"
+    let output = Command::new("sh")
+        .args([
+            "-c",
+            &format!(
+                r#"
 {script}
 uname() {{
     case "$1" in
@@ -149,10 +155,8 @@ uname() {{
 get_architecture
 echo "$RETVAL"
 "#
-    );
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(&full_script)
+            ),
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -267,18 +271,19 @@ fn script_foundryup_repo_defined() {
 #[test]
 fn script_foundryup_bin_dir_default() {
     let script = script_without_main();
-    let full_script = format!(
-        r#"
+    let output = Command::new("sh")
+        .args([
+            "-c",
+            &format!(
+                r#"
 unset FOUNDRY_DIR
 unset XDG_CONFIG_HOME
 HOME=/tmp/test_home
 {script}
 echo "$FOUNDRYUP_BIN_DIR"
 "#
-    );
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(&full_script)
+            ),
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -290,16 +295,17 @@ echo "$FOUNDRYUP_BIN_DIR"
 #[test]
 fn script_foundryup_bin_dir_custom() {
     let script = script_without_main();
-    let full_script = format!(
-        r#"
+    let output = Command::new("sh")
+        .args([
+            "-c",
+            &format!(
+                r#"
 FOUNDRY_DIR=/custom/path
 {script}
 echo "$FOUNDRYUP_BIN_DIR"
 "#
-    );
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(&full_script)
+            ),
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
