@@ -318,7 +318,7 @@ fn script_downloads_foundryup() {
 fn script_compute_sha256_known_value() {
     let output = run_script_function(
         r#"
-echo -n "hello" > /tmp/sha_test_file
+printf 'hello' > /tmp/sha_test_file
 hash=$(compute_sha256 /tmp/sha_test_file)
 rm -f /tmp/sha_test_file
 echo "$hash"
@@ -335,7 +335,7 @@ echo "$hash"
 fn script_compute_sha256_format() {
     let output = run_script_function(
         r#"
-echo -n "test" > /tmp/sha_format_test
+printf 'test' > /tmp/sha_format_test
 hash=$(compute_sha256 /tmp/sha_format_test)
 rm -f /tmp/sha_format_test
 
