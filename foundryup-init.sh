@@ -101,15 +101,17 @@ main() {
     local _url
     local _attestation_url
     local _base_url
+    local _ext
+    _ext=$(get_ext "$_arch")
     if [ "${FOUNDRYUP_VERSION+set}" = 'set' ]; then
         say "installing foundryup version $FOUNDRYUP_VERSION"
         _base_url="https://github.com/${FOUNDRYUP_REPO}/releases/download/v${FOUNDRYUP_VERSION}"
-        _url="${_base_url}/foundryup_${_arch}"
+        _url="${_base_url}/foundryup_${_arch}${_ext}"
         _attestation_url="${_base_url}/foundryup_${_arch}.attestation.txt"
     else
         say "installing latest foundryup"
         _base_url="https://github.com/${FOUNDRYUP_REPO}/releases/latest/download"
-        _url="${_base_url}/foundryup_${_arch}"
+        _url="${_base_url}/foundryup_${_arch}${_ext}"
         _attestation_url="${_base_url}/foundryup_${_arch}.attestation.txt"
     fi
 
@@ -267,6 +269,13 @@ get_architecture() {
     esac
 
     RETVAL="${_ostype}_${_cputype}"
+}
+
+get_ext() {
+    case "$1" in
+        win32_*) echo ".exe" ;;
+        *) echo "" ;;
+    esac
 }
 
 is_musl() {

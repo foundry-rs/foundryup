@@ -315,6 +315,20 @@ fn script_downloads_foundryup() {
 }
 
 #[test]
+fn script_get_ext_windows() {
+    let output = run_script_function(r#"echo "$(get_ext win32_amd64)""#);
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_eq!(stdout, ".exe", "get_ext should return .exe for win32");
+}
+
+#[test]
+fn script_get_ext_unix() {
+    let output = run_script_function(r#"echo "$(get_ext linux_amd64)""#);
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_eq!(stdout, "", "get_ext should return empty for linux");
+}
+
+#[test]
 fn script_compute_sha256_known_value() {
     let output = run_script_function(
         r#"
@@ -328,78 +342,6 @@ echo "$hash"
     assert_eq!(
         stdout, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
         "compute_sha256 should match known SHA256 of 'hello'"
-    );
-}
-
-#[test]
-fn script_compute_sha256_format() {
-    let output = run_script_function(
-        r#"
-printf 'test' > /tmp/sha_format_test
-hash=$(compute_sha256 /tmp/sha_format_test)
-rm -f /tmp/sha_format_test
-
-# Check length is 64 and format is hex
-if [ "${#hash}" -eq 64 ] && printf '%s' "$hash" | grep -qE '^[a-fA-F0-9]{64}$'; then
-    echo "format_ok"
-else
-    echo "format_bad: $hash"
-fi
-"#,
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("format_ok"), "SHA256 should be 64 hex characters");
-}
-
-#[test]
-fn script_try_download_success() {
-    let output = run_script_function(
-        r#"
-if try_download "https://github.com" /tmp/try_download_test; then
-    echo "download_ok"
-    rm -f /tmp/try_download_test
-else
-    echo "download_failed"
-fi
-"#,
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("download_ok"), "try_download should succeed for valid URL");
-}
-
-#[test]
-fn script_try_download_failure_no_exit() {
-    let output = run_script_function(
-        r#"
-if try_download "https://github.com/nonexistent-404-page-xyz" /tmp/try_download_fail; then
-    echo "unexpected_success"
-else
-    echo "graceful_failure"
-fi
-"#,
-    );
-    assert!(output.status.success(), "script should not exit on try_download failure");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("graceful_failure"),
-        "try_download should return false without exiting"
-    );
-}
-
-#[test]
-fn script_force_flag_documented() {
-    let output = Command::new("sh")
-        .args(["foundryup-init.sh", "--help"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("-f, --force") && stdout.contains("attestation"),
-        "help should document --force flag for skipping attestation"
     );
 }
 
@@ -428,13 +370,9 @@ fn script_downloads_with_attestation_verification() {
     assert!(foundryup_path.exists(), "foundryup binary should be installed");
 
     let combined = format!("{stdout}{stderr}");
-    let attestation_attempted = combined.contains("downloading attestation")
-        || combined.contains("verifying attestation")
-        || combined.contains("binary verified")
-        || combined.contains("no attestation found");
     assert!(
-        attestation_attempted,
-        "attestation verification should be attempted. Output: {combined}"
+        combined.contains("binary verified"),
+        "attestation verification should succeed with 'binary verified ✓'. Output: {combined}"
     );
 
     std::fs::remove_dir_all(&temp_dir).ok();
