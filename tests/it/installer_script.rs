@@ -27,11 +27,18 @@ fn shell_cmd() -> Command {
 }
 
 fn run_script_function(function_body: &str) -> std::process::Output {
+    use std::io::Write;
+
     let script = script_without_main();
     let full_script = format!("{script}\n\n{function_body}");
+
+    // Write script to temp file to avoid shell argument parsing issues on Windows
+    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+    temp_file.write_all(full_script.as_bytes()).unwrap();
+    temp_file.flush().unwrap();
+
     shell_cmd()
-        .arg("-c")
-        .arg(&full_script)
+        .arg(temp_file.path())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
