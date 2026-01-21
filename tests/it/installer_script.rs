@@ -26,15 +26,12 @@ fn shell_cmd() -> Command {
     }
 }
 
-fn run_script_function(function_body: &str) -> std::process::Output {
+/// Run a script via temp file to avoid shell argument parsing issues on Windows
+fn run_script(script: &str) -> std::process::Output {
     use std::io::Write;
 
-    let script = script_without_main();
-    let full_script = format!("{script}\n\n{function_body}");
-
-    // Write script to temp file to avoid shell argument parsing issues on Windows
     let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(full_script.as_bytes()).unwrap();
+    temp_file.write_all(script.as_bytes()).unwrap();
     temp_file.flush().unwrap();
 
     shell_cmd()
@@ -43,6 +40,12 @@ fn run_script_function(function_body: &str) -> std::process::Output {
         .stderr(Stdio::piped())
         .output()
         .unwrap()
+}
+
+fn run_script_function(function_body: &str) -> std::process::Output {
+    let script = script_without_main();
+    let full_script = format!("{script}\n\n{function_body}");
+    run_script(&full_script)
 }
 
 #[test]
@@ -78,11 +81,8 @@ fn script_help_flag() {
 #[test]
 fn script_get_architecture_linux_amd64() {
     let script = script_without_main();
-    let output = shell_cmd()
-        .args([
-            "-c",
-            &format!(
-                r#"
+    let full_script = format!(
+        r#"
 {script}
 uname() {{
     case "$1" in
@@ -94,12 +94,8 @@ is_musl() {{ return 1; }}
 get_architecture
 echo "$RETVAL"
 "#
-            ),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+    );
+    let output = run_script(&full_script);
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert_eq!(stdout, "linux_amd64");
 }
@@ -107,11 +103,8 @@ echo "$RETVAL"
 #[test]
 fn script_get_architecture_darwin_arm64() {
     let script = script_without_main();
-    let output = shell_cmd()
-        .args([
-            "-c",
-            &format!(
-                r#"
+    let full_script = format!(
+        r#"
 {script}
 uname() {{
     case "$1" in
@@ -122,12 +115,8 @@ uname() {{
 get_architecture
 echo "$RETVAL"
 "#
-            ),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+    );
+    let output = run_script(&full_script);
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert_eq!(stdout, "darwin_arm64");
 }
@@ -135,11 +124,8 @@ echo "$RETVAL"
 #[test]
 fn script_get_architecture_alpine() {
     let script = script_without_main();
-    let output = shell_cmd()
-        .args([
-            "-c",
-            &format!(
-                r#"
+    let full_script = format!(
+        r#"
 {script}
 uname() {{
     case "$1" in
@@ -151,12 +137,8 @@ is_musl() {{ return 0; }}
 get_architecture
 echo "$RETVAL"
 "#
-            ),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+    );
+    let output = run_script(&full_script);
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert_eq!(stdout, "alpine_amd64");
 }
@@ -164,11 +146,8 @@ echo "$RETVAL"
 #[test]
 fn script_get_architecture_windows() {
     let script = script_without_main();
-    let output = shell_cmd()
-        .args([
-            "-c",
-            &format!(
-                r#"
+    let full_script = format!(
+        r#"
 {script}
 uname() {{
     case "$1" in
@@ -179,12 +158,8 @@ uname() {{
 get_architecture
 echo "$RETVAL"
 "#
-            ),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+    );
+    let output = run_script(&full_script);
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert_eq!(stdout, "win32_amd64");
 }
@@ -295,23 +270,16 @@ fn script_foundryup_repo_defined() {
 #[test]
 fn script_foundryup_bin_dir_default() {
     let script = script_without_main();
-    let output = shell_cmd()
-        .args([
-            "-c",
-            &format!(
-                r#"
+    let full_script = format!(
+        r#"
 unset FOUNDRY_DIR
 unset XDG_CONFIG_HOME
 HOME=/tmp/test_home
 {script}
 echo "$FOUNDRYUP_BIN_DIR"
 "#
-            ),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+    );
+    let output = run_script(&full_script);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("/tmp/test_home/.foundry/bin"));
 }
@@ -319,21 +287,14 @@ echo "$FOUNDRYUP_BIN_DIR"
 #[test]
 fn script_foundryup_bin_dir_custom() {
     let script = script_without_main();
-    let output = shell_cmd()
-        .args([
-            "-c",
-            &format!(
-                r#"
+    let full_script = format!(
+        r#"
 FOUNDRY_DIR=/custom/path
 {script}
 echo "$FOUNDRYUP_BIN_DIR"
 "#
-            ),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+    );
+    let output = run_script(&full_script);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("/custom/path/bin"));
 }
