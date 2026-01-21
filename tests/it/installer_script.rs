@@ -20,7 +20,7 @@ fn run_script_function(function_body: &str) -> std::process::Output {
 #[test]
 fn script_has_shebang() {
     let script = include_str!("../../foundryup-init.sh");
-    assert!(script.starts_with("#!/bin/sh"), "script should start with shebang");
+    assert!(script.starts_with("#!/usr/bin/env bash"), "script should start with shebang");
 }
 
 #[test]
