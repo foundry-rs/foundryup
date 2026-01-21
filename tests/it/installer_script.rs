@@ -308,7 +308,6 @@ fn script_downloads_foundryup() {
         .args(["foundryup-init.sh", "-y"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("FOUNDRY_DIR", &temp_dir)
-        .env("FOUNDRYUP_SKIP_VERIFY", "true")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()

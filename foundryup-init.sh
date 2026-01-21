@@ -131,7 +131,8 @@ main() {
         say "skipping attestation verification (--force or FOUNDRYUP_SKIP_VERIFY set)"
     else
         say "downloading attestation..."
-        if downloader "$_attestation_url" "$_attestation_file" "$_arch" 2>/dev/null; then
+        # Use curl/wget directly to avoid the downloader's exit-on-404 behavior
+        if try_download "$_attestation_url" "$_attestation_file"; then
             local _attestation_artifact_link
             _attestation_artifact_link="$(head -n1 "$_attestation_file" | tr -d '\r')"
 
@@ -139,7 +140,7 @@ main() {
                 say "verifying attestation..."
                 local _sigstore_file="${_dir}/attestation.sigstore.json"
 
-                if downloader "${_attestation_artifact_link}/download" "$_sigstore_file" "$_arch" 2>/dev/null; then
+                if try_download "${_attestation_artifact_link}/download" "$_sigstore_file"; then
                     # Extract the payload from the sigstore JSON and decode it
                     local _payload_b64
                     local _payload_json
@@ -325,6 +326,17 @@ compute_sha256() {
         shasum -a 256 "$1" | cut -d' ' -f1
     else
         err "need 'sha256sum' or 'shasum' for verification"
+    fi
+}
+
+# Download without exiting on failure (used for optional files like attestations)
+try_download() {
+    if check_cmd curl; then
+        curl --proto '=https' --tlsv1.2 --silent --fail --location "$1" --output "$2" 2>/dev/null
+    elif check_cmd wget; then
+        wget --https-only --secure-protocol=TLSv1_2 -q "$1" -O "$2" 2>/dev/null
+    else
+        return 1
     fi
 }
 
