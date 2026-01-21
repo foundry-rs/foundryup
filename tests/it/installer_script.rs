@@ -234,11 +234,7 @@ fn script_assert_nz_failure() {
         stdout,
         stderr
     );
-    assert!(
-        stderr.contains("assert_nz test"),
-        "stderr missing 'assert_nz test': {}",
-        stderr
-    );
+    assert!(stderr.contains("assert_nz test"), "stderr missing 'assert_nz test': {}", stderr);
 }
 
 #[test]

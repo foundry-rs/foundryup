@@ -29,7 +29,7 @@ Options:
 All other options are passed to foundryup after installation.
 
 Environment variables:
-  FOUNDRYUP_VERSION      Install a specific version of foundryup
+  FOUNDRYUP_VERSION              Install a specific version of foundryup
   FOUNDRYUP_IGNORE_VERIFICATION  Skip attestation verification if set to "true"
 EOF
 }
