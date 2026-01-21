@@ -424,10 +424,7 @@ fn script_downloads_with_attestation_verification() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(
-        output.status.success(),
-        "script failed:\nstdout: {stdout}\nstderr: {stderr}"
-    );
+    assert!(output.status.success(), "script failed:\nstdout: {stdout}\nstderr: {stderr}");
     assert!(foundryup_path.exists(), "foundryup binary should be installed");
 
     let combined = format!("{stdout}{stderr}");
@@ -461,10 +458,7 @@ fn script_downloads_with_force_skips_attestation() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(
-        output.status.success(),
-        "script failed:\nstdout: {stdout}\nstderr: {stderr}"
-    );
+    assert!(output.status.success(), "script failed:\nstdout: {stdout}\nstderr: {stderr}");
 
     let combined = format!("{stdout}{stderr}");
     assert!(
