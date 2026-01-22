@@ -1,20 +1,35 @@
-use std::process::{Command, Stdio};
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
+
+fn normalize_line_endings(s: &str) -> String {
+    s.replace("\r\n", "\n").replace('\r', "")
+}
 
 fn script_without_main() -> String {
     let script = include_str!("../../foundryup-init.sh");
-    script.replace("main \"$@\" || exit 1", "")
+    normalize_line_endings(script).replace("main \"$@\" || exit 1", "")
+}
+
+fn run_script(script: &str) -> std::process::Output {
+    let normalized = normalize_line_endings(script);
+    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+    temp_file.write_all(normalized.as_bytes()).unwrap();
+    temp_file.flush().unwrap();
+
+    Command::new("sh")
+        .arg(temp_file.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap()
 }
 
 fn run_script_function(function_body: &str) -> std::process::Output {
     let script = script_without_main();
     let full_script = format!("{script}\n\n{function_body}");
-    Command::new("sh")
-        .arg("-c")
-        .arg(&full_script)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap()
+    run_script(&full_script)
 }
 
 #[test]
@@ -50,11 +65,8 @@ fn script_help_flag() {
 #[test]
 fn script_get_architecture_linux_amd64() {
     let script = script_without_main();
-    let output = Command::new("sh")
-        .args([
-            "-c",
-            &format!(
-                r#"
+    let output = run_script(&format!(
+        r#"
 {script}
 uname() {{
     case "$1" in
@@ -66,12 +78,7 @@ is_musl() {{ return 1; }}
 get_architecture
 echo "$RETVAL"
 "#
-            ),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+    ));
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert_eq!(stdout, "linux_amd64");
 }
@@ -79,11 +86,8 @@ echo "$RETVAL"
 #[test]
 fn script_get_architecture_darwin_arm64() {
     let script = script_without_main();
-    let output = Command::new("sh")
-        .args([
-            "-c",
-            &format!(
-                r#"
+    let output = run_script(&format!(
+        r#"
 {script}
 uname() {{
     case "$1" in
@@ -94,12 +98,7 @@ uname() {{
 get_architecture
 echo "$RETVAL"
 "#
-            ),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+    ));
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert_eq!(stdout, "darwin_arm64");
 }
@@ -107,11 +106,8 @@ echo "$RETVAL"
 #[test]
 fn script_get_architecture_alpine() {
     let script = script_without_main();
-    let output = Command::new("sh")
-        .args([
-            "-c",
-            &format!(
-                r#"
+    let output = run_script(&format!(
+        r#"
 {script}
 uname() {{
     case "$1" in
@@ -123,12 +119,7 @@ is_musl() {{ return 0; }}
 get_architecture
 echo "$RETVAL"
 "#
-            ),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+    ));
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert_eq!(stdout, "alpine_amd64");
 }
@@ -136,11 +127,8 @@ echo "$RETVAL"
 #[test]
 fn script_get_architecture_windows() {
     let script = script_without_main();
-    let output = Command::new("sh")
-        .args([
-            "-c",
-            &format!(
-                r#"
+    let output = run_script(&format!(
+        r#"
 {script}
 uname() {{
     case "$1" in
@@ -151,12 +139,7 @@ uname() {{
 get_architecture
 echo "$RETVAL"
 "#
-            ),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+    ));
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert_eq!(stdout, "win32_amd64");
 }
@@ -189,17 +172,31 @@ fn script_need_cmd_fails_for_missing() {
 #[test]
 fn script_assert_nz_success() {
     let output = run_script_function("assert_nz 'value' 'test' && echo 'ok'");
-    assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("ok"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "expected success, got {:?}\nstdout: {}\nstderr: {}",
+        output.status,
+        stdout,
+        stderr
+    );
+    assert!(stdout.contains("ok"), "stdout missing 'ok': {}", stdout);
 }
 
 #[test]
 fn script_assert_nz_failure() {
     let output = run_script_function("assert_nz '' 'test'");
-    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("assert_nz test"));
+    assert!(
+        !output.status.success(),
+        "expected failure, got {:?}\nstdout: {}\nstderr: {}",
+        output.status,
+        stdout,
+        stderr
+    );
+    assert!(stderr.contains("assert_nz test"), "stderr missing 'assert_nz test': {}", stderr);
 }
 
 #[test]
@@ -253,23 +250,15 @@ fn script_foundryup_repo_defined() {
 #[test]
 fn script_foundryup_bin_dir_default() {
     let script = script_without_main();
-    let output = Command::new("sh")
-        .args([
-            "-c",
-            &format!(
-                r#"
+    let output = run_script(&format!(
+        r#"
 unset FOUNDRY_DIR
 unset XDG_CONFIG_HOME
 HOME=/tmp/test_home
 {script}
 echo "$FOUNDRYUP_BIN_DIR"
 "#
-            ),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+    ));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("/tmp/test_home/.foundry/bin"));
 }
@@ -277,21 +266,13 @@ echo "$FOUNDRYUP_BIN_DIR"
 #[test]
 fn script_foundryup_bin_dir_custom() {
     let script = script_without_main();
-    let output = Command::new("sh")
-        .args([
-            "-c",
-            &format!(
-                r#"
+    let output = run_script(&format!(
+        r#"
 FOUNDRY_DIR=/custom/path
 {script}
 echo "$FOUNDRYUP_BIN_DIR"
 "#
-            ),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+    ));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("/custom/path/bin"));
 }
@@ -329,6 +310,99 @@ fn script_downloads_foundryup() {
         let permissions = metadata.permissions();
         assert!(permissions.mode() & 0o111 != 0, "foundryup should be executable");
     }
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn script_get_ext_windows() {
+    let output = run_script_function(r#"echo "$(get_ext win32_amd64)""#);
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_eq!(stdout, ".exe", "get_ext should return .exe for win32");
+}
+
+#[test]
+fn script_get_ext_unix() {
+    let output = run_script_function(r#"echo "$(get_ext linux_amd64)""#);
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_eq!(stdout, "", "get_ext should return empty for linux");
+}
+
+#[test]
+fn script_compute_sha256_known_value() {
+    let output = run_script_function(
+        r#"
+printf 'hello' > /tmp/sha_test_file
+hash=$(compute_sha256 /tmp/sha_test_file)
+rm -f /tmp/sha_test_file
+echo "$hash"
+"#,
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_eq!(
+        stdout, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "compute_sha256 should match known SHA256 of 'hello'"
+    );
+}
+
+#[test]
+fn script_downloads_with_attestation_verification() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("foundryup-attest-test-{}", std::process::id()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let bin_dir = temp_dir.join("bin");
+    let foundryup_path = bin_dir.join("foundryup");
+
+    let output = Command::new("sh")
+        .args(["foundryup-init.sh", "-y"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("FOUNDRY_DIR", &temp_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "script failed:\nstdout: {stdout}\nstderr: {stderr}");
+    assert!(foundryup_path.exists(), "foundryup binary should be installed");
+
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("binary verified"),
+        "attestation verification should succeed with 'binary verified ✓'. Output: {combined}"
+    );
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn script_downloads_with_force_skips_attestation() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("foundryup-force-test-{}", std::process::id()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let output = Command::new("sh")
+        .args(["foundryup-init.sh", "-y", "--force"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("FOUNDRY_DIR", &temp_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "script failed:\nstdout: {stdout}\nstderr: {stderr}");
+
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("skipping attestation verification"),
+        "--force should skip attestation. Output: {combined}"
+    );
 
     std::fs::remove_dir_all(&temp_dir).ok();
 }

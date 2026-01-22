@@ -17,12 +17,13 @@ has_local() {
 
 has_local 2>/dev/null || alias local=typeset
 
-set -u
+set -eu
 
 FOUNDRYUP_REPO="foundry-rs/foundryup"
 BASE_DIR="${XDG_CONFIG_HOME:-$HOME}"
 FOUNDRY_DIR="${FOUNDRY_DIR:-$BASE_DIR/.foundry}"
 FOUNDRYUP_BIN_DIR="$FOUNDRY_DIR/bin"
+FOUNDRYUP_IGNORE_VERIFICATION="${FOUNDRYUP_IGNORE_VERIFICATION:-false}"
 
 usage() {
     cat <<EOF
@@ -36,13 +37,15 @@ Options:
   -v, --verbose   Enable verbose output
   -q, --quiet     Disable progress output
   -y, --yes       Skip confirmation prompt
+  -f, --force     Skip attestation verification (INSECURE)
   -h, --help      Print help
   -V, --version   Print version
 
 All other options are passed to foundryup after installation.
 
 Environment variables:
-  FOUNDRYUP_VERSION   Install a specific version of foundryup
+  FOUNDRYUP_VERSION              Install a specific version of foundryup
+  FOUNDRYUP_IGNORE_VERIFICATION  Skip attestation verification if set to "true"
 EOF
 }
 
@@ -82,6 +85,9 @@ main() {
                 _quiet=yes
                 _passthrough_args="$_passthrough_args $arg"
                 ;;
+            -f|--force)
+                FOUNDRYUP_IGNORE_VERIFICATION=true
+                ;;
             -y|--yes)
                 _need_tty=no
                 _passthrough_args="$_passthrough_args $arg"
@@ -93,12 +99,20 @@ main() {
     done
 
     local _url
+    local _attestation_url
+    local _base_url
+    local _ext
+    _ext=$(get_ext "$_arch")
     if [ "${FOUNDRYUP_VERSION+set}" = 'set' ]; then
         say "installing foundryup version $FOUNDRYUP_VERSION"
-        _url="https://github.com/${FOUNDRYUP_REPO}/releases/download/v${FOUNDRYUP_VERSION}/foundryup_${_arch}"
+        _base_url="https://github.com/${FOUNDRYUP_REPO}/releases/download/v${FOUNDRYUP_VERSION}"
+        _url="${_base_url}/foundryup_${_arch}${_ext}"
+        _attestation_url="${_base_url}/foundryup_${_arch}.attestation.txt"
     else
         say "installing latest foundryup"
-        _url="https://github.com/${FOUNDRYUP_REPO}/releases/latest/download/foundryup_${_arch}"
+        _base_url="https://github.com/${FOUNDRYUP_REPO}/releases/latest/download"
+        _url="${_base_url}/foundryup_${_arch}${_ext}"
+        _attestation_url="${_base_url}/foundryup_${_arch}.attestation.txt"
     fi
 
     if [ "$_verbose" = "yes" ]; then
@@ -111,17 +125,72 @@ main() {
         exit 1
     fi
     local _file="${_dir}/foundryup"
+    local _attestation_file="${_dir}/attestation.txt"
+    local _expected_hash=""
+
+    # Download attestation and extract expected hash (unless skipping verification)
+    if [ "$FOUNDRYUP_IGNORE_VERIFICATION" = "true" ]; then
+        say "skipping attestation verification (--force or FOUNDRYUP_IGNORE_VERIFICATION set)"
+    else
+        say "downloading attestation..."
+        # Use curl/wget directly to avoid the downloader's exit-on-404 behavior
+        if try_download "$_attestation_url" "$_attestation_file"; then
+            local _attestation_artifact_link
+            _attestation_artifact_link="$(head -n1 "$_attestation_file" | tr -d '\r')"
+
+            if [ -n "$_attestation_artifact_link" ] && ! grep -q 'Not Found' "$_attestation_file"; then
+                say "verifying attestation..."
+                local _sigstore_file="${_dir}/attestation.sigstore.json"
+
+                if try_download "${_attestation_artifact_link}/download" "$_sigstore_file"; then
+                    # Extract the payload from the sigstore JSON and decode it
+                    local _payload_b64
+                    local _payload_json
+                    _payload_b64=$(awk '/"payload":/ {gsub(/[",]/, "", $2); print $2; exit}' "$_sigstore_file")
+                    _payload_json=$(printf '%s' "$_payload_b64" | base64 -d 2>/dev/null || printf '%s' "$_payload_b64" | base64 -D 2>/dev/null || true)
+
+                    if [ -n "$_payload_json" ]; then
+                        # Extract SHA256 hash from the payload
+                        _expected_hash=$(printf '%s' "$_payload_json" | grep -oE '"sha256"[[:space:]]*:[[:space:]]*"[a-fA-F0-9]{64}"' | head -1 | grep -oE '[a-fA-F0-9]{64}')
+                    fi
+
+                    rm -f "$_sigstore_file"
+                fi
+            fi
+
+            rm -f "$_attestation_file"
+        fi
+
+        if [ -z "$_expected_hash" ]; then
+            warn "no attestation found for this release, skipping verification"
+        fi
+    fi
 
     say "downloading foundryup..."
 
     ensure mkdir -p "$_dir"
     ensure downloader "$_url" "$_file" "$_arch"
+
+    # Verify the downloaded binary against the attestation hash
+    if [ -n "$_expected_hash" ]; then
+        say "verifying binary integrity..."
+        local _actual_hash
+        _actual_hash=$(compute_sha256 "$_file")
+
+        if [ "$_actual_hash" != "$_expected_hash" ]; then
+            err "hash verification failed:
+  expected: $_expected_hash
+  actual:   $_actual_hash
+Use --force to skip verification (INSECURE)"
+        fi
+        say "binary verified ✓"
+    fi
+
     ensure chmod u+x "$_file"
 
     if [ ! -x "$_file" ]; then
-        err "cannot execute $_file (likely because of mounting /tmp as noexec)."
-        err "please copy the file to a location where you can execute binaries and run ./foundryup"
-        exit 1
+        err "cannot execute $_file (likely because of mounting /tmp as noexec).
+please copy the file to a location where you can execute binaries and run ./foundryup"
     fi
 
     say "installing foundryup to $FOUNDRYUP_BIN_DIR..."
@@ -179,7 +248,6 @@ get_architecture() {
             ;;
         *)
             err "unsupported OS: $_ostype"
-            exit 1
             ;;
     esac
 
@@ -197,11 +265,17 @@ get_architecture() {
             ;;
         *)
             err "unsupported architecture: $_cputype"
-            exit 1
             ;;
     esac
 
     RETVAL="${_ostype}_${_cputype}"
+}
+
+get_ext() {
+    case "$1" in
+        win32_*) echo ".exe" ;;
+        *) echo "" ;;
+    esac
 }
 
 is_musl() {
@@ -248,6 +322,27 @@ check_cmd() {
 assert_nz() {
     if [ -z "$1" ]; then
         err "assert_nz $2"
+    fi
+}
+
+compute_sha256() {
+    if check_cmd sha256sum; then
+        sha256sum "$1" | cut -d' ' -f1 | sed 's/^\\//'
+    elif check_cmd shasum; then
+        shasum -a 256 "$1" | cut -d' ' -f1
+    else
+        err "need 'sha256sum' or 'shasum' for verification"
+    fi
+}
+
+# Download without exiting on failure (used for optional files like attestations)
+try_download() {
+    if check_cmd curl; then
+        curl --proto '=https' --tlsv1.2 --silent --fail --location "$1" --output "$2" 2>/dev/null
+    elif check_cmd wget; then
+        wget --https-only --secure-protocol=TLSv1_2 -q "$1" -O "$2" 2>/dev/null
+    else
+        return 1
     fi
 }
 

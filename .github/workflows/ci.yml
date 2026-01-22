@@ -30,18 +30,18 @@ jobs:
             target: x86_64-unknown-linux-gnu
             platform: linux
             arch: amd64
-          # - os: depot-ubuntu-22.04-arm
-          #   target: aarch64-unknown-linux-gnu
-          #   platform: linux
-          #   arch: arm64
+          - os: depot-ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux
+            arch: arm64
           - os: depot-ubuntu-22.04
             target: x86_64-unknown-linux-musl
             platform: alpine
             arch: amd64
-          # - os: depot-ubuntu-22.04-arm
-          #   target: aarch64-unknown-linux-musl
-          #   platform: alpine
-          #   arch: arm64
+          - os: depot-ubuntu-22.04-arm
+            target: aarch64-unknown-linux-musl
+            platform: alpine
+            arch: arm64
           - os: macos-14
             target: x86_64-apple-darwin
             platform: darwin
@@ -89,6 +89,19 @@ jobs:
           persist-credentials: false
       - uses: crate-ci/typos@65120634e79d8374d1aa2f27e54baa0c364fff5a # v1
 
+  shellcheck:
+    runs-on: depot-ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Shellcheck
+        shell: bash
+        run: ./.github/scripts/shellcheck.sh
+
   clippy:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -131,6 +144,7 @@ jobs:
     needs:
       - test
       - typos
+      - shellcheck
       - clippy
       - rustfmt
     timeout-minutes: 30
