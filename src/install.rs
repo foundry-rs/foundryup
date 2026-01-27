@@ -23,6 +23,8 @@ pub(crate) async fn run(config: &Config, args: &Cli) -> Result<()> {
 
     if is_default_repo && !should_build {
         install_prebuilt(config, args).await
+    } else if args.prebuilt && args.pr.is_some() {
+        install_prebuilt_from_pr(config, repo, args).await
     } else {
         install_from_source(config, repo, args).await
     }
@@ -62,6 +64,145 @@ async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
 
     use_version(config, repo, &tag)?;
     say!("done!");
+
+    Ok(())
+}
+
+async fn install_prebuilt_from_pr(config: &Config, repo: &str, args: &Cli) -> Result<()> {
+    let pr = args.pr.expect("--prebuilt requires --pr");
+
+    warn!("⚠️  SECURITY WARNING: You are about to install binaries built from PR #{pr}.");
+    warn!("⚠️  These binaries are NOT officially released and may contain untrusted code.");
+    warn!("⚠️  Please review the PR changes before proceeding: https://github.com/{repo}/pull/{pr}");
+    eprintln!();
+
+    let target = Target::detect(args.platform.as_deref(), args.arch.as_deref())?;
+    let downloader = Downloader::new()?;
+
+    say!("fetching workflow runs for PR #{pr}...");
+
+    // Get the PR head SHA first
+    let pr_url = format!("https://api.github.com/repos/{repo}/pulls/{pr}");
+    let pr_json = downloader.download_to_string(&pr_url).await?;
+    let pr_data: serde_json::Value = serde_json::from_str(&pr_json)?;
+    let head_sha = pr_data["head"]["sha"]
+        .as_str()
+        .ok_or_else(|| eyre::eyre!("could not get PR head SHA"))?;
+
+    say!("PR #{pr} head SHA: {}", &head_sha[..8]);
+
+    // Find workflow runs for this SHA
+    let runs_url = format!(
+        "https://api.github.com/repos/{repo}/actions/runs?head_sha={head_sha}&status=success&per_page=10"
+    );
+    let runs_json = downloader.download_to_string(&runs_url).await?;
+    let runs_data: serde_json::Value = serde_json::from_str(&runs_json)?;
+
+    let workflow_runs = runs_data["workflow_runs"]
+        .as_array()
+        .ok_or_else(|| eyre::eyre!("no workflow runs found"))?;
+
+    // Find the CI workflow run (usually named "ci" or "CI")
+    let ci_run = workflow_runs
+        .iter()
+        .find(|run| {
+            let name = run["name"].as_str().unwrap_or("");
+            name.to_lowercase().contains("ci") || name.to_lowercase().contains("build")
+        })
+        .or_else(|| workflow_runs.first())
+        .ok_or_else(|| eyre::eyre!("no successful CI workflow run found for PR #{pr}"))?;
+
+    let run_id = ci_run["id"]
+        .as_u64()
+        .ok_or_else(|| eyre::eyre!("could not get workflow run ID"))?;
+    let workflow_name = ci_run["name"].as_str().unwrap_or("unknown");
+
+    say!("found workflow '{workflow_name}' (run ID: {run_id})");
+
+    // Get artifacts for this run
+    let artifacts_url = format!("https://api.github.com/repos/{repo}/actions/runs/{run_id}/artifacts");
+    let artifacts_json = downloader.download_to_string(&artifacts_url).await?;
+    let artifacts_data: serde_json::Value = serde_json::from_str(&artifacts_json)?;
+
+    let artifacts = artifacts_data["artifacts"]
+        .as_array()
+        .ok_or_else(|| eyre::eyre!("no artifacts found"))?;
+
+    // Find the matching artifact for our platform
+    let platform_str = target.platform.as_str();
+    let arch_str = target.arch.as_str();
+    let artifact_patterns = [
+        format!("foundry_{platform_str}_{arch_str}"),
+        format!("foundry-{platform_str}-{arch_str}"),
+        format!("{platform_str}_{arch_str}"),
+        format!("{platform_str}-{arch_str}"),
+    ];
+
+    let matching_artifact = artifacts
+        .iter()
+        .find(|artifact| {
+            let name = artifact["name"].as_str().unwrap_or("");
+            artifact_patterns.iter().any(|pattern| name.contains(pattern))
+        })
+        .ok_or_else(|| {
+            let available: Vec<_> = artifacts
+                .iter()
+                .filter_map(|a| a["name"].as_str())
+                .collect();
+            eyre::eyre!(
+                "no artifact found for {platform_str}/{arch_str}. Available artifacts: {}",
+                available.join(", ")
+            )
+        })?;
+
+    let artifact_name = matching_artifact["name"].as_str().unwrap_or("unknown");
+    let artifact_id = matching_artifact["id"]
+        .as_u64()
+        .ok_or_else(|| eyre::eyre!("could not get artifact ID"))?;
+
+    say!("downloading artifact '{artifact_name}'...");
+
+    // Note: Downloading artifacts requires authentication for private repos.
+    // For public repos, we can use the nightly.link service as a workaround,
+    // or users need to set GITHUB_TOKEN.
+    let download_url = format!(
+        "https://nightly.link/{repo}/actions/runs/{run_id}/{artifact_name}.zip"
+    );
+
+    let temp_dir = tempfile::tempdir()?;
+    let archive_path = temp_dir.path().join(format!("{artifact_name}.zip"));
+
+    if let Err(e) = downloader.download_to_file(&download_url, &archive_path).await {
+        // Fallback: try GitHub API directly (requires GITHUB_TOKEN)
+        let api_url = format!(
+            "https://api.github.com/repos/{repo}/actions/artifacts/{artifact_id}/zip"
+        );
+        warn!("nightly.link failed ({e}), trying GitHub API (requires GITHUB_TOKEN)...");
+        downloader.download_to_file(&api_url, &archive_path).await?;
+    }
+
+    let version = format!("pr-{pr}");
+    let version_dir = config.version_dir(repo, &version);
+    fs::create_dir_all(&version_dir)?;
+
+    say!("extracting binaries...");
+    extract_zip(&archive_path, &version_dir)?;
+
+    // Set executable permissions on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for entry in fs::read_dir(&version_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+            }
+        }
+    }
+
+    use_version(config, repo, &version)?;
+    say!("done! Installed PR #{pr} binaries.");
 
     Ok(())
 }

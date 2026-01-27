@@ -40,6 +40,11 @@ pub(crate) struct Cli {
     #[arg(short = 'P', long, conflicts_with = "branch")]
     pub pr: Option<u64>,
 
+    /// Download prebuilt binaries from GitHub Actions CI instead of building from source
+    /// (only works with --pr or --branch)
+    #[arg(long, requires = "pr")]
+    pub prebuilt: bool,
+
     /// Build and install a specific commit
     #[arg(short = 'C', long)]
     pub commit: Option<String>,
