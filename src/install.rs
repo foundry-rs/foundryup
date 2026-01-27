@@ -73,7 +73,9 @@ async fn install_prebuilt_from_pr(config: &Config, repo: &str, args: &Cli) -> Re
 
     warn!("⚠️  SECURITY WARNING: You are about to install binaries built from PR #{pr}.");
     warn!("⚠️  These binaries are NOT officially released and may contain untrusted code.");
-    warn!("⚠️  Please review the PR changes before proceeding: https://github.com/{repo}/pull/{pr}");
+    warn!(
+        "⚠️  Please review the PR changes before proceeding: https://github.com/{repo}/pull/{pr}"
+    );
     eprintln!();
 
     let target = Target::detect(args.platform.as_deref(), args.arch.as_deref())?;
@@ -85,9 +87,8 @@ async fn install_prebuilt_from_pr(config: &Config, repo: &str, args: &Cli) -> Re
     let pr_url = format!("https://api.github.com/repos/{repo}/pulls/{pr}");
     let pr_json = downloader.download_to_string(&pr_url).await?;
     let pr_data: serde_json::Value = serde_json::from_str(&pr_json)?;
-    let head_sha = pr_data["head"]["sha"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("could not get PR head SHA"))?;
+    let head_sha =
+        pr_data["head"]["sha"].as_str().ok_or_else(|| eyre::eyre!("could not get PR head SHA"))?;
 
     say!("PR #{pr} head SHA: {}", &head_sha[..8]);
 
@@ -112,21 +113,20 @@ async fn install_prebuilt_from_pr(config: &Config, repo: &str, args: &Cli) -> Re
         .or_else(|| workflow_runs.first())
         .ok_or_else(|| eyre::eyre!("no successful CI workflow run found for PR #{pr}"))?;
 
-    let run_id = ci_run["id"]
-        .as_u64()
-        .ok_or_else(|| eyre::eyre!("could not get workflow run ID"))?;
+    let run_id =
+        ci_run["id"].as_u64().ok_or_else(|| eyre::eyre!("could not get workflow run ID"))?;
     let workflow_name = ci_run["name"].as_str().unwrap_or("unknown");
 
     say!("found workflow '{workflow_name}' (run ID: {run_id})");
 
     // Get artifacts for this run
-    let artifacts_url = format!("https://api.github.com/repos/{repo}/actions/runs/{run_id}/artifacts");
+    let artifacts_url =
+        format!("https://api.github.com/repos/{repo}/actions/runs/{run_id}/artifacts");
     let artifacts_json = downloader.download_to_string(&artifacts_url).await?;
     let artifacts_data: serde_json::Value = serde_json::from_str(&artifacts_json)?;
 
-    let artifacts = artifacts_data["artifacts"]
-        .as_array()
-        .ok_or_else(|| eyre::eyre!("no artifacts found"))?;
+    let artifacts =
+        artifacts_data["artifacts"].as_array().ok_or_else(|| eyre::eyre!("no artifacts found"))?;
 
     // Find the matching artifact for our platform
     let platform_str = target.platform.as_str();
@@ -145,10 +145,7 @@ async fn install_prebuilt_from_pr(config: &Config, repo: &str, args: &Cli) -> Re
             artifact_patterns.iter().any(|pattern| name.contains(pattern))
         })
         .ok_or_else(|| {
-            let available: Vec<_> = artifacts
-                .iter()
-                .filter_map(|a| a["name"].as_str())
-                .collect();
+            let available: Vec<_> = artifacts.iter().filter_map(|a| a["name"].as_str()).collect();
             eyre::eyre!(
                 "no artifact found for {platform_str}/{arch_str}. Available artifacts: {}",
                 available.join(", ")
@@ -156,27 +153,24 @@ async fn install_prebuilt_from_pr(config: &Config, repo: &str, args: &Cli) -> Re
         })?;
 
     let artifact_name = matching_artifact["name"].as_str().unwrap_or("unknown");
-    let artifact_id = matching_artifact["id"]
-        .as_u64()
-        .ok_or_else(|| eyre::eyre!("could not get artifact ID"))?;
+    let artifact_id =
+        matching_artifact["id"].as_u64().ok_or_else(|| eyre::eyre!("could not get artifact ID"))?;
 
     say!("downloading artifact '{artifact_name}'...");
 
     // Note: Downloading artifacts requires authentication for private repos.
     // For public repos, we can use the nightly.link service as a workaround,
     // or users need to set GITHUB_TOKEN.
-    let download_url = format!(
-        "https://nightly.link/{repo}/actions/runs/{run_id}/{artifact_name}.zip"
-    );
+    let download_url =
+        format!("https://nightly.link/{repo}/actions/runs/{run_id}/{artifact_name}.zip");
 
     let temp_dir = tempfile::tempdir()?;
     let archive_path = temp_dir.path().join(format!("{artifact_name}.zip"));
 
     if let Err(e) = downloader.download_to_file(&download_url, &archive_path).await {
         // Fallback: try GitHub API directly (requires GITHUB_TOKEN)
-        let api_url = format!(
-            "https://api.github.com/repos/{repo}/actions/artifacts/{artifact_id}/zip"
-        );
+        let api_url =
+            format!("https://api.github.com/repos/{repo}/actions/artifacts/{artifact_id}/zip");
         warn!("nightly.link failed ({e}), trying GitHub API (requires GITHUB_TOKEN)...");
         downloader.download_to_file(&api_url, &archive_path).await?;
     }
