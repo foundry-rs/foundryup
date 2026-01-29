@@ -48,6 +48,14 @@ pub(crate) struct Cli {
     #[arg(short = 'j', long)]
     pub jobs: Option<u32>,
 
+    /// Cargo profile to use for building
+    #[arg(long, default_value = "release")]
+    pub cargo_profile: String,
+
+    /// Cargo features to enable for building
+    #[arg(long)]
+    pub cargo_features: Option<String>,
+
     /// Install binaries for a specific network (e.g., tempo)
     #[arg(short = 'n', long)]
     pub network: Option<Network>,
