@@ -74,11 +74,18 @@ async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> R
     say!("installing from {}", local_path.display());
 
     let mut cmd = tokio::process::Command::new("cargo");
-    cmd.arg("build").arg("--bins").arg("--release").current_dir(local_path);
+    cmd.arg("build")
+        .arg("--bins")
+        .arg("--profile")
+        .arg(&args.cargo_profile)
+        .current_dir(local_path);
     cmd.env("RUSTFLAGS", rustflags());
 
     if let Some(jobs) = args.jobs {
         cmd.arg("--jobs").arg(jobs.to_string());
+    }
+    if let Some(ref features) = args.cargo_features {
+        cmd.arg("--features").arg(features);
     }
 
     let status = cmd.status().await.wrap_err("failed to run cargo build")?;
@@ -86,8 +93,9 @@ async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> R
         bail!("cargo build failed");
     }
 
+    let target_dir = profile_target_dir(&args.cargo_profile);
     for bin in config.network.bins {
-        let src = local_path.join("target/release").join(bin_name(bin));
+        let src = local_path.join("target").join(target_dir).join(bin_name(bin));
         let dest = config.bin_path(bin);
 
         if dest.exists() {
@@ -102,6 +110,10 @@ async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> R
 
     say!("done");
     Ok(())
+}
+
+fn profile_target_dir(profile: &str) -> &str {
+    if profile == "dev" { "debug" } else { profile }
 }
 
 async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<()> {
@@ -171,11 +183,18 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
     say!("installing version {version}");
 
     let mut cmd = tokio::process::Command::new("cargo");
-    cmd.arg("build").arg("--bins").arg("--release").current_dir(&repo_path);
+    cmd.arg("build")
+        .arg("--bins")
+        .arg("--profile")
+        .arg(&args.cargo_profile)
+        .current_dir(&repo_path);
     cmd.env("RUSTFLAGS", rustflags());
 
     if let Some(jobs) = args.jobs {
         cmd.arg("--jobs").arg(jobs.to_string());
+    }
+    if let Some(ref features) = args.cargo_features {
+        cmd.arg("--features").arg(features);
     }
 
     let status = cmd.status().await.wrap_err("failed to run cargo build")?;
@@ -186,8 +205,9 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
     let version_dir = config.version_dir(repo, &version);
     fs::create_dir_all(&version_dir)?;
 
+    let target_dir = profile_target_dir(&args.cargo_profile);
     for bin in config.network.bins {
-        let src = repo_path.join("target/release").join(bin_name(bin));
+        let src = repo_path.join("target").join(target_dir).join(bin_name(bin));
         if src.exists() {
             fs::rename(&src, version_dir.join(bin_name(bin)))?;
         }
