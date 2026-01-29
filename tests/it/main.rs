@@ -67,6 +67,14 @@ Options:
   -j, --jobs <JOBS>
           Number of CPUs to use for building (default: all)
 
+      --cargo-profile <CARGO_PROFILE>
+          Cargo profile to use for building
+          
+          [default: release]
+
+      --cargo-features <CARGO_FEATURES>
+          Cargo features to enable for building
+
   -n, --network <NETWORK>
           Install binaries for a specific network (e.g., tempo)
           
