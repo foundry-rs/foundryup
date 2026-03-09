@@ -527,6 +527,8 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
             continue;
         }
 
+        let old_version = if dest.exists() { get_bin_version(&dest).ok() } else { None };
+
         if dest.exists() {
             fs::remove_file(&dest)?;
         }
@@ -537,7 +539,10 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
         fs::copy(&src, &dest)?;
 
         match get_bin_version(&dest) {
-            Ok(v) => say!("use - {v}"),
+            Ok(v) => match old_version {
+                Some(old) if old != v => say!("use - {v} (from {old})"),
+                _ => say!("use - {v}"),
+            },
             Err(_) => say!("use - {bin}"),
         }
 
