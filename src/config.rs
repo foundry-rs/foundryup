@@ -27,14 +27,13 @@ pub(crate) struct Config {
 
 impl Config {
     pub(crate) fn new(network: Option<Network>) -> Result<Self> {
-        let base_dir =
-            std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(home::home_dir);
-
-        let base_dir = base_dir.ok_or_else(|| eyre::eyre!("could not determine home directory"))?;
-
-        let foundry_dir = std::env::var_os("FOUNDRY_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| base_dir.join(".foundry"));
+        let foundry_dir = if let Some(dir) = std::env::var_os("FOUNDRY_DIR") {
+            PathBuf::from(dir)
+        } else {
+            let home_dir = home::home_dir()
+                .ok_or_else(|| eyre::eyre!("could not determine home directory"))?;
+            home_dir.join(".foundry")
+        };
 
         let versions_dir = foundry_dir.join("versions");
         let bin_dir = foundry_dir.join("bin");
@@ -158,5 +157,45 @@ impl NetworkConfig {
             Some(Network::Tempo) => Self::TEMPO,
             None => Self::FOUNDRY,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xdg_config_home_does_not_affect_default_foundry_dir() {
+        // Simulate XDG_CONFIG_HOME being set (e.g. Ubuntu 24.04 desktop)
+        let orig_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let orig_foundry = std::env::var_os("FOUNDRY_DIR");
+
+        // SAFETY: test-only env manipulation, tests run single-threaded via --test-threads=1
+        // or this test doesn't share state with others.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg_config");
+            std::env::remove_var("FOUNDRY_DIR");
+        }
+
+        let config = Config::new(None).unwrap();
+        let home = home::home_dir().unwrap();
+
+        // Restore
+        unsafe {
+            match orig_xdg {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match orig_foundry {
+                Some(v) => std::env::set_var("FOUNDRY_DIR", v),
+                None => std::env::remove_var("FOUNDRY_DIR"),
+            }
+        }
+
+        assert_eq!(
+            config.foundry_dir,
+            home.join(".foundry"),
+            "foundry_dir should be $HOME/.foundry, not $XDG_CONFIG_HOME/.foundry"
+        );
     }
 }

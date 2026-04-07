@@ -264,6 +264,25 @@ echo "$FOUNDRYUP_BIN_DIR"
 }
 
 #[test]
+fn script_xdg_config_home_does_not_affect_default_path() {
+    let script = script_without_main();
+    let output = run_script(&format!(
+        r#"
+unset FOUNDRY_DIR
+XDG_CONFIG_HOME=/tmp/xdg_config
+HOME=/tmp/test_home
+{script}
+echo "$FOUNDRY_DIR"
+"#
+    ));
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_eq!(
+        stdout, "/tmp/test_home/.foundry",
+        "FOUNDRY_DIR should use $HOME, not $XDG_CONFIG_HOME"
+    );
+}
+
+#[test]
 fn script_foundryup_bin_dir_custom() {
     let script = script_without_main();
     let output = run_script(&format!(

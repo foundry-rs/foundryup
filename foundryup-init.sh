@@ -20,8 +20,7 @@ has_local 2>/dev/null || alias local=typeset
 set -eu
 
 FOUNDRYUP_REPO="foundry-rs/foundryup"
-BASE_DIR="${XDG_CONFIG_HOME:-$HOME}"
-FOUNDRY_DIR="${FOUNDRY_DIR:-$BASE_DIR/.foundry}"
+FOUNDRY_DIR="${FOUNDRY_DIR:-$HOME/.foundry}"
 FOUNDRYUP_BIN_DIR="$FOUNDRY_DIR/bin"
 FOUNDRYUP_IGNORE_VERIFICATION="${FOUNDRYUP_IGNORE_VERIFICATION:-false}"
 
