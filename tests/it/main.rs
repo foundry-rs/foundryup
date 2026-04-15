@@ -2,7 +2,6 @@ use snapbox::{cmd::Command, str};
 use std::{env::consts::EXE_SUFFIX, path::Path};
 
 const BINS: &[&str] = &["forge", "cast", "anvil", "chisel"];
-const TEMPO_BINS: &[&str] = &["forge", "cast"];
 
 mod installer_script;
 mod self_update;
@@ -74,11 +73,6 @@ Options:
 
       --cargo-features <CARGO_FEATURES>
           Cargo features to enable for building
-
-  -n, --network <NETWORK>
-          Install binaries for a specific network (e.g., tempo)
-          
-          [possible values: tempo]
 
   -f, --force
           Skip SHA verification (INSECURE)
@@ -287,28 +281,3 @@ fn reinstall_uses_cache() {
 "#]]);
 }
 
-#[test]
-fn install_tempo_nightly() {
-    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
-    let foundry_dir = temp_dir.path().join(".foundry");
-
-    foundryup()
-        .env("FOUNDRY_DIR", &foundry_dir)
-        .args(["--network", "tempo"])
-        .assert()
-        .success()
-        .stderr_eq(str![[r#"
-...
-[..]installing tempo-foundry[..]
-...
-[..]done!
-...
-"#]]);
-
-    for &bin in TEMPO_BINS {
-        let name = format!("{bin}{EXE_SUFFIX}");
-        assert!(foundry_dir.join("bin").join(&name).exists(), "{name} does not exist");
-    }
-
-    run_forge_test(&foundry_dir, temp_dir.path());
-}

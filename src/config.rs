@@ -1,4 +1,4 @@
-use crate::{cli::Network, say};
+use crate::say;
 use eyre::Result;
 use fs_err as fs;
 use std::path::{Path, PathBuf};
@@ -26,7 +26,7 @@ pub(crate) struct Config {
 }
 
 impl Config {
-    pub(crate) fn new(network: Option<Network>) -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         let base_dir =
             std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(home::home_dir);
 
@@ -39,9 +39,7 @@ impl Config {
         let versions_dir = foundry_dir.join("versions");
         let bin_dir = foundry_dir.join("bin");
         let man_dir = foundry_dir.join("share/man/man1");
-        let network = NetworkConfig::for_network(network);
-
-        Ok(Self { foundry_dir, versions_dir, bin_dir, man_dir, network })
+        Ok(Self { foundry_dir, versions_dir, bin_dir, man_dir, network: NetworkConfig::FOUNDRY })
     }
 
     pub(crate) fn ensure_dirs(&self) -> Result<()> {
@@ -135,7 +133,7 @@ pub(crate) struct NetworkConfig {
 }
 
 impl NetworkConfig {
-    const FOUNDRY: Self = Self {
+    pub(crate) const FOUNDRY: Self = Self {
         repo: "foundry-rs/foundry",
         bins: &["forge", "cast", "anvil", "chisel"],
         archive_prefix: "foundry",
@@ -143,20 +141,4 @@ impl NetworkConfig {
         display_name: "foundry",
         has_attestation: true,
     };
-
-    const TEMPO: Self = Self {
-        repo: "tempoxyz/tempo-foundry",
-        bins: &["forge", "cast"],
-        archive_prefix: "foundry",
-        default_version: "nightly",
-        display_name: "tempo-foundry",
-        has_attestation: false,
-    };
-
-    fn for_network(network: Option<Network>) -> Self {
-        match network {
-            Some(Network::Tempo) => Self::TEMPO,
-            None => Self::FOUNDRY,
-        }
-    }
 }
