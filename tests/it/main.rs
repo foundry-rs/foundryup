@@ -280,4 +280,3 @@ fn reinstall_uses_cache() {
 ...
 "#]]);
 }
-
