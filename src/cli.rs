@@ -56,9 +56,9 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub cargo_features: Option<String>,
 
-    /// Install binaries for a specific network (e.g., tempo)
-    #[arg(short = 'n', long)]
-    pub network: Option<Network>,
+    /// [deprecated] Install binaries for a specific network
+    #[arg(short = 'n', long, hide = true)]
+    pub network: Option<String>,
 
     /// Skip SHA verification (INSECURE)
     #[arg(short = 'f', long)]
@@ -75,11 +75,6 @@ pub(crate) struct Cli {
     /// Generate shell completions
     #[arg(long, value_name = "SHELL")]
     pub completions: Option<clap_complete::Shell>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub(crate) enum Network {
-    Tempo,
 }
 
 pub(crate) fn print_completions(shell: clap_complete::Shell) {
