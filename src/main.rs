@@ -49,7 +49,13 @@ async fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
-    let config = Arc::new(Config::new(cli.network)?);
+    if cli.network.is_some() {
+        warn!(
+            "the --network flag is deprecated and will be removed in a future release. Tempo is now included in the default Foundry installation."
+        );
+    }
+
+    let config = Arc::new(Config::new()?);
     config.migrate_legacy_versions()?;
 
     if cli.update {
