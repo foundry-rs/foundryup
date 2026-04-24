@@ -29,15 +29,18 @@ pub(crate) async fn run(config: &Config, args: &Cli) -> Result<()> {
 }
 
 async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
-    let (version, tag) =
-        normalize_version(args.version.as_deref().unwrap_or(config.network.default_version));
-
     let repo = config.network.repo;
-
-    say!("installing {} (version {version}, tag {tag})", config.network.display_name);
-
     let target = Target::detect(args.platform.as_deref(), args.arch.as_deref())?;
     let downloader = Downloader::new()?;
+
+    let (version, tag) = resolve_version(
+        &downloader,
+        repo,
+        args.version.as_deref().unwrap_or(config.network.default_version),
+    )
+    .await?;
+
+    say!("installing {} (version {version}, tag {tag})", config.network.display_name);
 
     let release_url =
         format!("https://github.com/{}/releases/download/{tag}/", config.network.repo);
@@ -566,14 +569,80 @@ in your 'PATH' to allow the newly installed version to take precedence!
     Ok(())
 }
 
-fn normalize_version(version: &str) -> (String, String) {
-    if version.starts_with("nightly") {
-        ("nightly".to_string(), version.to_string())
-    } else if version.starts_with(|c: char| c.is_ascii_digit()) {
-        let s = format!("v{version}");
-        (s.clone(), s)
-    } else {
-        (version.to_string(), version.to_string())
+/// Resolves a version channel or identifier to a (version, tag) pair.
+///
+/// - `"latest"` / `"stable"`: resolves to the latest non-prerelease release via the GitHub API
+/// - `"nightly"`: resolves to the latest `nightly-{SHA}` prerelease via the GitHub API
+/// - `"nightly-{SHA}"`: uses the specific nightly tag directly
+/// - `"v1.2.3"` or `"1.2.3"`: uses the specific version tag directly
+async fn resolve_version(
+    downloader: &Downloader,
+    repo: &str,
+    version: &str,
+) -> Result<(String, String)> {
+    match version {
+        "latest" | "stable" => {
+            say!("resolving latest release...");
+            let tag = resolve_latest_release(downloader, repo, Channel::Latest).await?;
+            Ok((tag.clone(), tag))
+        }
+        "nightly" => {
+            say!("resolving latest nightly release...");
+            let tag = resolve_latest_release(downloader, repo, Channel::Nightly).await?;
+            Ok(("nightly".to_string(), tag))
+        }
+        v if v.starts_with("nightly-") => Ok(("nightly".to_string(), v.to_string())),
+        v if v.starts_with(|c: char| c.is_ascii_digit()) => {
+            let s = format!("v{v}");
+            Ok((s.clone(), s))
+        }
+        v => Ok((v.to_string(), v.to_string())),
+    }
+}
+
+enum Channel {
+    Latest,
+    Nightly,
+}
+
+/// Resolves the latest release tag from the GitHub API.
+async fn resolve_latest_release(
+    downloader: &Downloader,
+    repo: &str,
+    channel: Channel,
+) -> Result<String> {
+    match channel {
+        Channel::Latest => {
+            // Use the dedicated /releases/latest endpoint which always returns
+            // the latest non-prerelease, non-draft release regardless of how
+            // many prereleases exist.
+            let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+            let release: serde_json::Value = downloader.download_json(&url).await?;
+            release["tag_name"]
+                .as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| eyre::eyre!("could not find a latest release for {repo}"))
+        }
+        Channel::Nightly => {
+            // The latest nightly is always the most recent prerelease, so the
+            // first page is sufficient.
+            let url = format!("https://api.github.com/repos/{repo}/releases?per_page=50");
+            let releases: serde_json::Value = downloader.download_json(&url).await?;
+            let releases =
+                releases.as_array().ok_or_else(|| eyre::eyre!("unexpected API response"))?;
+
+            for release in releases {
+                let tag = release["tag_name"].as_str().unwrap_or_default();
+                let prerelease = release["prerelease"].as_bool().unwrap_or(false);
+                let draft = release["draft"].as_bool().unwrap_or(false);
+
+                if !draft && prerelease && tag.starts_with("nightly-") {
+                    return Ok(tag.to_string());
+                }
+            }
+
+            bail!("could not find a nightly release for {repo}")
+        }
     }
 }
 

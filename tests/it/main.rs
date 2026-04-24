@@ -31,7 +31,7 @@ The installer for Foundry.
 
 Update or revert to a specific Foundry version with ease.
 
-By default, the latest stable version is installed from built binaries.
+By default, the latest version is installed from built binaries.
 
 Usage: foundryup[EXE] [OPTIONS]
 
@@ -46,7 +46,8 @@ Options:
           Build and install a specific branch
 
   -i, --install <VERSION>
-          Install a specific version from built binaries (e.g., stable, nightly, 0.3.0)
+          Install a specific version from built binaries (e.g., latest, nightly, nightly-<SHA>, or
+          v1.2.3)
 
   -l, --list
           List installed versions
@@ -225,6 +226,10 @@ foundryup: - chisel [..]
 }
 
 #[test]
+fn install_latest() {
+    test_install("latest");
+}
+#[test]
 fn install_stable() {
     test_install("stable");
 }
@@ -246,11 +251,22 @@ fn use_version() {
     let temp_dir = tempfile::Builder::new().tempdir().unwrap();
     let foundry_dir = temp_dir.path().join(".foundry");
 
-    foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["-i", "stable"]).assert().success();
+    foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["-i", "latest"]).assert().success();
+
+    // The resolved tag (e.g. v1.6.0) is used as the version directory name
+    let versions_dir = foundry_dir.join("versions/foundry-rs/foundry");
+    let resolved_version = std::fs::read_dir(&versions_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .find(|e| e.file_name().to_string_lossy().starts_with('v'))
+        .expect("no version directory found")
+        .file_name()
+        .to_string_lossy()
+        .to_string();
 
     foundryup()
         .env("FOUNDRY_DIR", &foundry_dir)
-        .args(["--use", "stable"])
+        .args(["--use", &resolved_version])
         .assert()
         .success()
         .stderr_eq(str![[r#"
@@ -265,11 +281,11 @@ fn reinstall_uses_cache() {
     let temp_dir = tempfile::Builder::new().tempdir().unwrap();
     let foundry_dir = temp_dir.path().join(".foundry");
 
-    foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["-i", "stable"]).assert().success();
+    foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["-i", "latest"]).assert().success();
 
     foundryup()
         .env("FOUNDRY_DIR", &foundry_dir)
-        .args(["-i", "stable"])
+        .args(["-i", "latest"])
         .assert()
         .success()
         .stderr_eq(str![[r#"

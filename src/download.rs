@@ -66,6 +66,22 @@ impl Downloader {
         Ok(())
     }
 
+    pub(crate) async fn download_json(&self, url: &str) -> Result<serde_json::Value> {
+        let response = self
+            .client
+            .get(url)
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await
+            .wrap_err_with(|| format!("failed to GET {url}"))?;
+
+        if !response.status().is_success() {
+            bail!("failed to fetch {url}: HTTP {}", response.status());
+        }
+
+        response.json().await.wrap_err("failed to parse JSON response")
+    }
+
     pub(crate) async fn download_to_string(&self, url: &str) -> Result<String> {
         let response =
             self.client.get(url).send().await.wrap_err_with(|| format!("failed to GET {url}"))?;

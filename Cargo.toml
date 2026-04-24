@@ -38,6 +38,7 @@ vergen-gitcl = { version = "1", features = ["build", "rustc"] }
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "gzip",
+    "json",
     "stream",
 ] }
 tokio = { version = "1", features = ["rt-multi-thread", "fs", "process", "io-util"] }

@@ -137,7 +137,7 @@ impl NetworkConfig {
         repo: "foundry-rs/foundry",
         bins: &["forge", "cast", "anvil", "chisel"],
         archive_prefix: "foundry",
-        default_version: "stable",
+        default_version: "latest",
         display_name: "foundry",
         has_attestation: true,
     };

@@ -4,7 +4,7 @@ use clap::{CommandFactory, Parser};
 ///
 /// Update or revert to a specific Foundry version with ease.
 ///
-/// By default, the latest stable version is installed from built binaries.
+/// By default, the latest version is installed from built binaries.
 #[derive(Debug, Parser)]
 #[command(name = "foundryup", version = crate::config::LONG_VERSION, about)]
 pub(crate) struct Cli {
@@ -20,7 +20,7 @@ pub(crate) struct Cli {
     #[arg(short = 'b', long, conflicts_with = "pr")]
     pub branch: Option<String>,
 
-    /// Install a specific version from built binaries (e.g., stable, nightly, 0.3.0)
+    /// Install a specific version from built binaries (e.g., latest, nightly, nightly-<SHA>, or v1.2.3)
     #[arg(id = "ver", short = 'i', long = "install", value_name = "VERSION")]
     pub version: Option<String>,
 
