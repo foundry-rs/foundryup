@@ -20,7 +20,8 @@ pub(crate) struct Cli {
     #[arg(short = 'b', long, conflicts_with = "pr")]
     pub branch: Option<String>,
 
-    /// Install a specific version from built binaries (e.g., latest, nightly, nightly-<SHA>, or v1.2.3)
+    /// Install a specific version from built binaries (e.g., latest, nightly, nightly-<SHA>, or
+    /// v1.2.3)
     #[arg(id = "ver", short = 'i', long = "install", value_name = "VERSION")]
     pub version: Option<String>,
 
