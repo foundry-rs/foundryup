@@ -626,7 +626,7 @@ async fn resolve_latest_release(
         Channel::Nightly => {
             // The latest nightly is always the most recent prerelease, so the
             // first page is sufficient.
-            let url = format!("https://api.github.com/repos/{repo}/releases?per_page=50");
+            let url = format!("https://api.github.com/repos/{repo}/releases?per_page=10");
             let releases: serde_json::Value = downloader.download_json(&url).await?;
             let releases =
                 releases.as_array().ok_or_else(|| eyre::eyre!("unexpected API response"))?;

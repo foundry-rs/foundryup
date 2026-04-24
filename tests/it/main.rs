@@ -238,6 +238,10 @@ fn install_nightly() {
     test_install("nightly");
 }
 #[test]
+fn install_nightly_specific() {
+    test_install("nightly-a249f5cc35685c7d0ac5871885e06da5da623d52");
+}
+#[test]
 fn install_v1_5_0() {
     test_install("v1.5.0");
 }
