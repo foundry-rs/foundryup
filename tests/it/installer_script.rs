@@ -264,17 +264,71 @@ echo "$FOUNDRYUP_BIN_DIR"
 }
 
 #[test]
+fn script_foundry_dir_uses_xdg_config_home() {
+    let script = script_without_main();
+    let output = run_script(&format!(
+        r#"
+unset FOUNDRY_DIR
+XDG_CONFIG_HOME=/tmp/test_config
+HOME=/tmp/test_home
+{script}
+echo "$FOUNDRY_DIR"
+echo "$FOUNDRYUP_BIN_DIR"
+"#
+    ));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "/tmp/test_config/.foundry\n/tmp/test_config/.foundry/bin\n");
+}
+
+#[test]
+fn script_empty_xdg_config_home_falls_back_to_home() {
+    let script = script_without_main();
+    let output = run_script(&format!(
+        r#"
+unset FOUNDRY_DIR
+XDG_CONFIG_HOME=
+HOME=/tmp/test_home
+{script}
+echo "$FOUNDRY_DIR"
+echo "$FOUNDRYUP_BIN_DIR"
+"#
+    ));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "/tmp/test_home/.foundry\n/tmp/test_home/.foundry/bin\n");
+}
+
+#[test]
+fn script_empty_foundry_dir_uses_default_path() {
+    let script = script_without_main();
+    let output = run_script(&format!(
+        r#"
+FOUNDRY_DIR=
+XDG_CONFIG_HOME=/tmp/test_config
+HOME=/tmp/test_home
+{script}
+echo "$FOUNDRY_DIR"
+echo "$FOUNDRYUP_BIN_DIR"
+"#
+    ));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "/tmp/test_config/.foundry\n/tmp/test_config/.foundry/bin\n");
+}
+
+#[test]
 fn script_foundryup_bin_dir_custom() {
     let script = script_without_main();
     let output = run_script(&format!(
         r#"
 FOUNDRY_DIR=/custom/path
+XDG_CONFIG_HOME=/tmp/test_config
+HOME=/tmp/test_home
 {script}
+echo "$FOUNDRY_DIR"
 echo "$FOUNDRYUP_BIN_DIR"
 "#
     ));
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("/custom/path/bin"));
+    assert_eq!(stdout, "/custom/path\n/custom/path/bin\n");
 }
 
 #[test]

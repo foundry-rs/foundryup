@@ -12,7 +12,9 @@ fn update_flag_help() {
 
 #[test]
 fn update_checks_for_updates() {
-    foundryup().arg("-U").assert().stderr_eq(str![[r#"
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    foundryup().env("FOUNDRY_DIR", temp_dir.path()).arg("-U").assert().stderr_eq(str![[r#"
 ...
 foundryup: checking for updates...
 ...
