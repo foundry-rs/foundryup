@@ -5,26 +5,67 @@ use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 use std::{io::Write, path::Path};
 
+/// Number of retries (after the initial attempt) for transient HTTP failures.
+const MAX_RETRIES: u32 = 5;
+
+/// Transient HTTP statuses that may recover on retry (e.g. GitHub rate limiting
+/// or temporary outages). Other errors (e.g. 404) are treated as permanent.
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 403 | 408 | 429 | 500 | 502 | 503 | 504)
+}
+
+/// Retry scope matching every GitHub host foundryup talks to, including the
+/// CDN hosts that release downloads redirect to.
+struct GitHubHosts;
+
+impl PartialEq<&str> for GitHubHosts {
+    fn eq(&self, host: &&str) -> bool {
+        // Require a `.` boundary so lookalikes like `notgithub.com` don't match.
+        let host = host.trim_end_matches('.');
+        ["github.com", "githubusercontent.com"].iter().any(|domain| {
+            host == *domain || host.strip_suffix(domain).is_some_and(|prefix| prefix.ends_with('.'))
+        })
+    }
+}
+
 pub(crate) struct Downloader {
     client: reqwest::Client,
 }
 
 impl Downloader {
     pub(crate) fn new() -> Result<Self> {
+        // `no_budget` disables reqwest's default token budget, which would
+        // otherwise block retries on a CLI that issues only a few requests.
+        let retry = reqwest::retry::for_host(GitHubHosts)
+            .no_budget()
+            .max_retries_per_request(MAX_RETRIES)
+            .classify_fn(|req_rep| {
+                if req_rep.error().is_some() || req_rep.status().is_some_and(is_retryable_status) {
+                    req_rep.retryable()
+                } else {
+                    req_rep.success()
+                }
+            });
+
         let client = reqwest::Client::builder()
             .user_agent(concat!("foundryup/", env!("CARGO_PKG_VERSION")))
+            .retry(retry)
             .build()
             .wrap_err("failed to create HTTP client")?;
         Ok(Self { client })
     }
 
-    pub(crate) async fn download_to_file(&self, url: &str, path: &Path) -> Result<()> {
+    async fn send(&self, url: &str) -> Result<reqwest::Response> {
         let response =
             self.client.get(url).send().await.wrap_err_with(|| format!("failed to GET {url}"))?;
-
         if !response.status().is_success() {
             bail!("failed to download {url}: HTTP {}", response.status());
         }
+        Ok(response)
+    }
+
+    pub(crate) async fn download_to_file(&self, url: &str, path: &Path) -> Result<()> {
+        let response = self.send(url).await?;
 
         let total_size = response.content_length();
 
@@ -67,13 +108,7 @@ impl Downloader {
     }
 
     pub(crate) async fn download_to_string(&self, url: &str) -> Result<String> {
-        let response =
-            self.client.get(url).send().await.wrap_err_with(|| format!("failed to GET {url}"))?;
-
-        if !response.status().is_success() {
-            bail!("failed to download {url}: HTTP {}", response.status());
-        }
-
+        let response = self.send(url).await?;
         response.text().await.wrap_err("failed to read response body")
     }
 }
@@ -126,4 +161,31 @@ pub(crate) fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retryable_status_classification() {
+        for code in [403, 408, 429, 500, 502, 503, 504] {
+            assert!(is_retryable_status(reqwest::StatusCode::from_u16(code).unwrap()));
+        }
+        for code in [200, 301, 400, 401, 404, 410] {
+            assert!(!is_retryable_status(reqwest::StatusCode::from_u16(code).unwrap()));
+        }
+    }
+
+    #[test]
+    fn github_hosts_scope_matches_github_cdns() {
+        assert!(GitHubHosts == "github.com");
+        assert!(GitHubHosts == "api.github.com");
+        assert!(GitHubHosts == "raw.githubusercontent.com");
+        assert!(GitHubHosts == "objects.githubusercontent.com");
+        assert!(GitHubHosts != "example.com");
+        assert!(GitHubHosts != "notgithub.com");
+        assert!(GitHubHosts != "evilgithubusercontent.com");
+        assert!(GitHubHosts != "github.com.evil.com");
+    }
 }
