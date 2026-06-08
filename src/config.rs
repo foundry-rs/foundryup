@@ -16,6 +16,10 @@ pub(crate) const LONG_VERSION: &str = concat!(
 
 pub(crate) const FOUNDRYUP_REPO: &str = "foundry-rs/foundryup";
 
+fn env_path(key: &str) -> Option<PathBuf> {
+    std::env::var_os(key).filter(|value| !value.is_empty()).map(PathBuf::from)
+}
+
 #[derive(Debug)]
 pub(crate) struct Config {
     pub foundry_dir: PathBuf,
@@ -27,14 +31,11 @@ pub(crate) struct Config {
 
 impl Config {
     pub(crate) fn new() -> Result<Self> {
-        let base_dir =
-            std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(home::home_dir);
+        let base_dir = env_path("XDG_CONFIG_HOME").or_else(home::home_dir);
 
         let base_dir = base_dir.ok_or_else(|| eyre::eyre!("could not determine home directory"))?;
 
-        let foundry_dir = std::env::var_os("FOUNDRY_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| base_dir.join(".foundry"));
+        let foundry_dir = env_path("FOUNDRY_DIR").unwrap_or_else(|| base_dir.join(".foundry"));
 
         let versions_dir = foundry_dir.join("versions");
         let bin_dir = foundry_dir.join("bin");
@@ -141,4 +142,148 @@ impl NetworkConfig {
         display_name: "foundry",
         has_attestation: true,
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        env,
+        ffi::OsString,
+        path::Path,
+        sync::{Mutex, MutexGuard},
+    };
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        _guard: MutexGuard<'static, ()>,
+        vars: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn new() -> Self {
+            let guard = ENV_LOCK.lock().unwrap();
+            let vars = ["FOUNDRY_DIR", "XDG_CONFIG_HOME", "HOME", "USERPROFILE"]
+                .into_iter()
+                .map(|key| (key, env::var_os(key)))
+                .collect();
+            Self { _guard: guard, vars }
+        }
+
+        fn set(&self, key: &str, value: impl AsRef<Path>) {
+            // These tests serialize environment access with ENV_LOCK.
+            unsafe { env::set_var(key, value.as_ref()) };
+        }
+
+        fn set_empty(&self, key: &str) {
+            // These tests serialize environment access with ENV_LOCK.
+            unsafe { env::set_var(key, "") };
+        }
+
+        fn remove(&self, key: &str) {
+            // These tests serialize environment access with ENV_LOCK.
+            unsafe { env::remove_var(key) };
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.vars.iter().rev() {
+                // These tests serialize environment access with ENV_LOCK.
+                unsafe {
+                    match value {
+                        Some(value) => env::set_var(key, value),
+                        None => env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
+    fn assert_foundry_dirs(config: &Config, foundry_dir: &Path) {
+        assert_eq!(config.foundry_dir, foundry_dir);
+        assert_eq!(config.versions_dir, foundry_dir.join("versions"));
+        assert_eq!(config.bin_dir, foundry_dir.join("bin"));
+        assert_eq!(config.man_dir, foundry_dir.join("share/man/man1"));
+    }
+
+    #[test]
+    fn config_falls_back_to_home_without_xdg_config_home() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home_dir = temp_dir.path().join("home");
+        let env = EnvGuard::new();
+        env.remove("FOUNDRY_DIR");
+        env.remove("XDG_CONFIG_HOME");
+        env.set("HOME", &home_dir);
+        env.set("USERPROFILE", &home_dir);
+
+        let config = Config::new().unwrap();
+
+        assert_foundry_dirs(&config, &home_dir.join(".foundry"));
+    }
+
+    #[test]
+    fn config_uses_xdg_config_home_before_home() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home_dir = temp_dir.path().join("home");
+        let xdg_config_home = temp_dir.path().join("config");
+        let env = EnvGuard::new();
+        env.remove("FOUNDRY_DIR");
+        env.set("XDG_CONFIG_HOME", &xdg_config_home);
+        env.set("HOME", &home_dir);
+        env.set("USERPROFILE", &home_dir);
+
+        let config = Config::new().unwrap();
+
+        assert_foundry_dirs(&config, &xdg_config_home.join(".foundry"));
+    }
+
+    #[test]
+    fn config_empty_xdg_config_home_falls_back_to_home() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home_dir = temp_dir.path().join("home");
+        let env = EnvGuard::new();
+        env.remove("FOUNDRY_DIR");
+        env.set_empty("XDG_CONFIG_HOME");
+        env.set("HOME", &home_dir);
+        env.set("USERPROFILE", &home_dir);
+
+        let config = Config::new().unwrap();
+
+        assert_foundry_dirs(&config, &home_dir.join(".foundry"));
+    }
+
+    #[test]
+    fn config_empty_foundry_dir_uses_default_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home_dir = temp_dir.path().join("home");
+        let xdg_config_home = temp_dir.path().join("config");
+        let env = EnvGuard::new();
+        env.set_empty("FOUNDRY_DIR");
+        env.set("XDG_CONFIG_HOME", &xdg_config_home);
+        env.set("HOME", &home_dir);
+        env.set("USERPROFILE", &home_dir);
+
+        let config = Config::new().unwrap();
+
+        assert_foundry_dirs(&config, &xdg_config_home.join(".foundry"));
+    }
+
+    #[test]
+    fn config_foundry_dir_overrides_base_dir() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home_dir = temp_dir.path().join("home");
+        let xdg_config_home = temp_dir.path().join("config");
+        let foundry_dir = temp_dir.path().join("custom-foundry");
+        let env = EnvGuard::new();
+        env.set("FOUNDRY_DIR", &foundry_dir);
+        env.set("XDG_CONFIG_HOME", &xdg_config_home);
+        env.set("HOME", &home_dir);
+        env.set("USERPROFILE", &home_dir);
+
+        let config = Config::new().unwrap();
+
+        assert_foundry_dirs(&config, &foundry_dir);
+    }
 }
