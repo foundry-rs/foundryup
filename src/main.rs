@@ -70,7 +70,7 @@ async fn run(cli: Cli) -> Result<()> {
     if cli.list {
         install::list(&config)?;
     } else if let Some(ref version) = cli.use_version {
-        install::use_version(&config, config.network.repo, version)?;
+        install::use_version_resolved(&config, config.network.repo, version).await?;
     } else {
         print_banner();
         process::check_bins_in_use(&config)?;

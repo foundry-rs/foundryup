@@ -29,15 +29,20 @@ pub(crate) async fn run(config: &Config, args: &Cli) -> Result<()> {
 }
 
 async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
-    let (version, tag) =
-        normalize_version(args.version.as_deref().unwrap_or(config.network.default_version));
-
     let repo = config.network.repo;
+
+    let downloader = Downloader::new()?;
+
+    let (version, tag) = resolve_version_and_tag(
+        &downloader,
+        repo,
+        args.version.as_deref().unwrap_or(config.network.default_version),
+    )
+    .await?;
 
     say!("installing {} (version {version}, tag {tag})", config.network.display_name);
 
     let target = Target::detect(args.platform.as_deref(), args.arch.as_deref())?;
-    let downloader = Downloader::new()?;
 
     let release_url =
         format!("https://github.com/{}/releases/download/{tag}/", config.network.repo);
@@ -511,12 +516,22 @@ pub(crate) fn list(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Normalizes `version` and activates the matching installed version directory,
+/// so e.g. `1.5.0` resolves to the `v1.5.0` directory.
+pub(crate) async fn use_version_resolved(config: &Config, repo: &str, version: &str) -> Result<()> {
+    let downloader = Downloader::new()?;
+    let (_version, tag) = resolve_version_and_tag(&downloader, repo, version).await?;
+    use_version(config, repo, &tag)
+}
+
 pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<()> {
     let version_dir = config.version_dir(repo, version);
 
     if !version_dir.exists() {
         bail!("version {version} not installed for {repo}");
     }
+
+    fs::create_dir_all(&config.bin_dir)?;
 
     for bin in config.network.bins {
         let bin_name = bin_name(bin);
@@ -564,6 +579,42 @@ in your 'PATH' to allow the newly installed version to take precedence!
     }
 
     Ok(())
+}
+
+/// Resolves a requested version string to its `(version, tag)` pair, where `tag`
+/// is the concrete GitHub release tag to download from and `version` is the name
+/// used for the archive files and asset names.
+///
+/// The `latest` and `stable` channels are resolved to the newest non-prerelease
+/// tag via the GitHub API; everything else is normalized offline.
+pub(crate) async fn resolve_version_and_tag(
+    downloader: &Downloader,
+    repo: &str,
+    version: &str,
+) -> Result<(String, String)> {
+    if version == "latest" || version == "stable" {
+        say!("fetching latest release tag from {repo}...");
+        let tag = fetch_latest_release_tag(downloader, repo).await?;
+        say!("resolved release tag: {tag}");
+        Ok((tag.clone(), tag))
+    } else {
+        Ok(normalize_version(version))
+    }
+}
+
+/// Fetches the newest non-prerelease release tag for `repo` via the GitHub API.
+async fn fetch_latest_release_tag(downloader: &Downloader, repo: &str) -> Result<String> {
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let body = downloader
+        .download_to_string(&url)
+        .await
+        .wrap_err("failed to fetch release tags from GitHub API")?;
+    let json: serde_json::Value = serde_json::from_str(&body)?;
+    let tag = json["tag_name"].as_str().filter(|s| !s.is_empty());
+    match tag {
+        Some(tag) => Ok(tag.to_string()),
+        None => bail!("could not find a latest release tag for {repo}"),
+    }
 }
 
 fn normalize_version(version: &str) -> (String, String) {
