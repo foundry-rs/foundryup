@@ -1,3 +1,13 @@
 [profile.default]
 retries = { backoff = "exponential", count = 2, delay = "5s", jitter = true }
 slow-timeout = { period = "30s", terminate-after = 3 }
+
+# Run the install/use tests one at a time. They invoke `check_bins_in_use`,
+# which scans for running `forge`/`cast`/`anvil`/`chisel` processes globally, and
+# they also spawn those binaries themselves, so they must not run concurrently.
+[test-groups]
+foundry-bins = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(/install_/) | test(reinstall_uses_cache) | test(use_version)'
+test-group = 'foundry-bins'
