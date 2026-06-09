@@ -74,7 +74,9 @@ jobs:
           cache-on-failure: true
       - uses: taiki-e/install-action@nextest
       - name: Build
-        run: cargo build --target ${{ matrix.target }}
+        run: |
+          cargo clean -p foundryup --target ${{ matrix.target }}
+          cargo build --target ${{ matrix.target }}
       - name: Test
         run: cargo nextest run --no-fail-fast --target ${{ matrix.target }}
         env:
