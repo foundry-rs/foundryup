@@ -77,6 +77,8 @@ jobs:
         run: cargo build --target ${{ matrix.target }}
       - name: Test
         run: cargo nextest run --no-fail-fast --target ${{ matrix.target }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   typos:
     runs-on: ubuntu-latest
