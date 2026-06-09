@@ -72,11 +72,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          cache-targets: false
+          prefix-key: v1-rust
       - uses: taiki-e/install-action@nextest
       - name: Build
-        run: |
-          cargo clean -p foundryup --target ${{ matrix.target }}
-          cargo build --target ${{ matrix.target }}
+        run: cargo build --target ${{ matrix.target }}
       - name: Test
         run: cargo nextest run --no-fail-fast --target ${{ matrix.target }}
         env:
