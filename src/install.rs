@@ -518,6 +518,8 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
         bail!("version {version} not installed for {repo}");
     }
 
+    crate::process::check_bins_in_use(config)?;
+
     for bin in config.network.bins {
         let bin_name = bin_name(bin);
         let src = version_dir.join(&bin_name);
