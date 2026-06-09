@@ -586,7 +586,8 @@ in your 'PATH' to allow the newly installed version to take precedence!
 /// used for the archive files and asset names.
 ///
 /// The `latest` and `stable` channels are resolved to the newest non-prerelease
-/// tag via the GitHub API; everything else is normalized offline.
+/// tag via the GitHub API. The `nightly` channel is resolved to the newest
+/// nightly release tag. Everything else is normalized offline.
 pub(crate) async fn resolve_version_and_tag(
     downloader: &Downloader,
     repo: &str,
@@ -597,6 +598,11 @@ pub(crate) async fn resolve_version_and_tag(
         let tag = fetch_latest_release_tag(downloader, repo).await?;
         say!("resolved release tag: {tag}");
         Ok((tag.clone(), tag))
+    } else if version == "nightly" {
+        say!("fetching latest nightly release tags from {repo}...");
+        let tag = fetch_latest_nightly_release_tag(downloader, repo).await?;
+        say!("resolved nightly release tag: {tag}");
+        Ok(("nightly".to_string(), tag))
     } else {
         Ok(normalize_version(version))
     }
@@ -615,6 +621,33 @@ async fn fetch_latest_release_tag(downloader: &Downloader, repo: &str) -> Result
         Some(tag) => Ok(tag.to_string()),
         None => bail!("could not find a latest release tag for {repo}"),
     }
+}
+
+/// Fetches the newest nightly release tag for `repo` via the GitHub API.
+async fn fetch_latest_nightly_release_tag(downloader: &Downloader, repo: &str) -> Result<String> {
+    let url = format!("https://api.github.com/repos/{repo}/releases");
+    let body = downloader
+        .download_to_string(&url)
+        .await
+        .wrap_err("failed to fetch release tags from GitHub API")?;
+    latest_nightly_release_tag(&body, repo)
+}
+
+fn latest_nightly_release_tag(json: &str, repo: &str) -> Result<String> {
+    let json: serde_json::Value = serde_json::from_str(json)?;
+    let releases =
+        json.as_array().ok_or_else(|| eyre::eyre!("invalid release tags response for {repo}"))?;
+
+    releases
+        .iter()
+        .filter_map(|release| {
+            let tag = release["tag_name"].as_str()?;
+            let published_at = release["published_at"].as_str()?;
+            tag.starts_with("nightly-").then_some((published_at, tag))
+        })
+        .max_by_key(|(published_at, _tag)| *published_at)
+        .map(|(_published_at, tag)| tag.to_string())
+        .ok_or_else(|| eyre::eyre!("could not find a nightly release tag for {repo}"))
 }
 
 fn normalize_version(version: &str) -> (String, String) {
@@ -645,6 +678,44 @@ fn rustflags() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn latest_nightly_release_tag_selects_newest_published_at() {
+        let json = r#"[
+            {"tag_name": "nightly-old", "published_at": "2026-05-01T00:00:00Z"},
+            {"tag_name": "v1.5.0", "published_at": "2026-06-01T00:00:00Z"},
+            {"tag_name": "nightly-new", "published_at": "2026-05-03T00:00:00Z"},
+            {"tag_name": "nightly-middle", "published_at": "2026-05-02T00:00:00Z"}
+        ]"#;
+
+        let tag = latest_nightly_release_tag(json, "foundry-rs/foundry").unwrap();
+
+        assert_eq!(tag, "nightly-new");
+    }
+
+    #[test]
+    fn latest_nightly_release_tag_ignores_non_nightly_releases() {
+        let json = r#"[
+            {"tag_name": "v2.0.0", "published_at": "2026-06-01T00:00:00Z"},
+            {"tag_name": "stable", "published_at": "2026-06-02T00:00:00Z"},
+            {"tag_name": "nightly-abc", "published_at": "2026-05-01T00:00:00Z"}
+        ]"#;
+
+        let tag = latest_nightly_release_tag(json, "foundry-rs/foundry").unwrap();
+
+        assert_eq!(tag, "nightly-abc");
+    }
+
+    #[test]
+    fn latest_nightly_release_tag_errors_when_no_nightly_exists() {
+        let json = r#"[
+            {"tag_name": "v2.0.0", "published_at": "2026-06-01T00:00:00Z"}
+        ]"#;
+
+        let err = latest_nightly_release_tag(json, "foundry-rs/foundry").unwrap_err();
+
+        assert!(err.to_string().contains("could not find a nightly release tag"));
+    }
 
     #[test]
     fn attestation_de() {
