@@ -6,7 +6,7 @@ use clap::{CommandFactory, Parser};
 ///
 /// By default, the latest stable version is installed from built binaries.
 #[derive(Debug, Parser)]
-#[command(name = "foundryup", version = crate::config::LONG_VERSION, about)]
+#[command(name = "foundryup", version = crate::config::LONG_VERSION, about, disable_version_flag = true)]
 pub(crate) struct Cli {
     /// Update foundryup to the latest version
     #[arg(short = 'U', long = "update")]
@@ -75,6 +75,10 @@ pub(crate) struct Cli {
     /// Generate shell completions
     #[arg(long, value_name = "SHELL")]
     pub completions: Option<clap_complete::Shell>,
+
+    /// Print version
+    #[arg(short = 'V', short_alias = 'v', long = "version", action = clap::ArgAction::Version)]
+    pub version_flag: Option<bool>,
 }
 
 pub(crate) fn print_completions(shell: clap_complete::Shell) {

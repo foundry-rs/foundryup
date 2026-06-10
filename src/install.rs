@@ -29,15 +29,20 @@ pub(crate) async fn run(config: &Config, args: &Cli) -> Result<()> {
 }
 
 async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
-    let (version, tag) =
-        normalize_version(args.version.as_deref().unwrap_or(config.network.default_version));
-
     let repo = config.network.repo;
+
+    let downloader = Downloader::new()?;
+
+    let (version, tag) = resolve_version_and_tag(
+        &downloader,
+        repo,
+        args.version.as_deref().unwrap_or(config.network.default_version),
+    )
+    .await?;
 
     say!("installing {} (version {version}, tag {tag})", config.network.display_name);
 
     let target = Target::detect(args.platform.as_deref(), args.arch.as_deref())?;
-    let downloader = Downloader::new()?;
 
     let release_url =
         format!("https://github.com/{}/releases/download/{tag}/", config.network.repo);
@@ -214,7 +219,41 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
     }
 
     use_version(config, repo, &version)?;
+
+    generate_manpages_from_source(config).await?;
+
     say!("done");
+
+    Ok(())
+}
+
+/// Generates man pages from the freshly built binaries using `help2man`,
+/// writing each `<bin>.1` into the man directory. Skipped when `help2man` is
+/// not installed.
+async fn generate_manpages_from_source(config: &Config) -> Result<()> {
+    if which::which("help2man").is_err() {
+        return Ok(());
+    }
+
+    for bin in config.network.bins {
+        let bin_path = config.bin_path(bin);
+        let man_path = config.man_dir.join(format!("{bin}.1"));
+
+        // Create/truncate the destination first, matching the shell's `> file`.
+        let man_file = fs::File::create(&man_path)?;
+
+        let status = tokio::process::Command::new("help2man")
+            .arg("-N")
+            .arg(&bin_path)
+            .stdout(std::process::Stdio::from(man_file.into_parts().0))
+            .status()
+            .await
+            .wrap_err_with(|| format!("failed to run help2man for {bin}"))?;
+
+        if !status.success() {
+            bail!("help2man failed for {bin}");
+        }
+    }
 
     Ok(())
 }
@@ -511,6 +550,14 @@ pub(crate) fn list(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Normalizes `version` and activates the matching installed version directory,
+/// so e.g. `1.5.0` resolves to the `v1.5.0` directory.
+pub(crate) async fn use_version_resolved(config: &Config, repo: &str, version: &str) -> Result<()> {
+    let downloader = Downloader::new()?;
+    let (_version, tag) = resolve_version_and_tag(&downloader, repo, version).await?;
+    use_version(config, repo, &tag)
+}
+
 pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<()> {
     let version_dir = config.version_dir(repo, version);
 
@@ -519,6 +566,7 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
     }
 
     crate::process::check_bins_in_use(config)?;
+    fs::create_dir_all(&config.bin_dir)?;
 
     for bin in config.network.bins {
         let bin_name = bin_name(bin);
@@ -568,6 +616,75 @@ in your 'PATH' to allow the newly installed version to take precedence!
     Ok(())
 }
 
+/// Resolves a requested version string to its `(version, tag)` pair, where `tag`
+/// is the concrete GitHub release tag to download from and `version` is the name
+/// used for the archive files and asset names.
+///
+/// The `latest` and `stable` channels are resolved to the newest non-prerelease
+/// tag via the GitHub API. The `nightly` channel is resolved to the newest
+/// nightly release tag. Everything else is normalized offline.
+pub(crate) async fn resolve_version_and_tag(
+    downloader: &Downloader,
+    repo: &str,
+    version: &str,
+) -> Result<(String, String)> {
+    if version == "latest" || version == "stable" {
+        say!("fetching latest release tag from {repo}...");
+        let tag = fetch_latest_release_tag(downloader, repo).await?;
+        say!("resolved release tag: {tag}");
+        Ok((tag.clone(), tag))
+    } else if version == "nightly" {
+        say!("fetching latest nightly release tags from {repo}...");
+        let tag = fetch_latest_nightly_release_tag(downloader, repo).await?;
+        say!("resolved nightly release tag: {tag}");
+        Ok(("nightly".to_string(), tag))
+    } else {
+        Ok(normalize_version(version))
+    }
+}
+
+/// Fetches the newest non-prerelease release tag for `repo` via the GitHub API.
+async fn fetch_latest_release_tag(downloader: &Downloader, repo: &str) -> Result<String> {
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let body = downloader
+        .download_to_string(&url)
+        .await
+        .wrap_err("failed to fetch release tags from GitHub API")?;
+    let json: serde_json::Value = serde_json::from_str(&body)?;
+    let tag = json["tag_name"].as_str().filter(|s| !s.is_empty());
+    match tag {
+        Some(tag) => Ok(tag.to_string()),
+        None => bail!("could not find a latest release tag for {repo}"),
+    }
+}
+
+/// Fetches the newest nightly release tag for `repo` via the GitHub API.
+async fn fetch_latest_nightly_release_tag(downloader: &Downloader, repo: &str) -> Result<String> {
+    let url = format!("https://api.github.com/repos/{repo}/releases");
+    let body = downloader
+        .download_to_string(&url)
+        .await
+        .wrap_err("failed to fetch release tags from GitHub API")?;
+    latest_nightly_release_tag(&body, repo)
+}
+
+fn latest_nightly_release_tag(json: &str, repo: &str) -> Result<String> {
+    let json: serde_json::Value = serde_json::from_str(json)?;
+    let releases =
+        json.as_array().ok_or_else(|| eyre::eyre!("invalid release tags response for {repo}"))?;
+
+    releases
+        .iter()
+        .filter_map(|release| {
+            let tag = release["tag_name"].as_str()?;
+            let published_at = release["published_at"].as_str()?;
+            tag.starts_with("nightly-").then_some((published_at, tag))
+        })
+        .max_by_key(|(published_at, _tag)| *published_at)
+        .map(|(_published_at, tag)| tag.to_string())
+        .ok_or_else(|| eyre::eyre!("could not find a nightly release tag for {repo}"))
+}
+
 fn normalize_version(version: &str) -> (String, String) {
     if version.starts_with("nightly") {
         ("nightly".to_string(), version.to_string())
@@ -596,6 +713,44 @@ fn rustflags() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn latest_nightly_release_tag_selects_newest_published_at() {
+        let json = r#"[
+            {"tag_name": "nightly-old", "published_at": "2026-05-01T00:00:00Z"},
+            {"tag_name": "v1.5.0", "published_at": "2026-06-01T00:00:00Z"},
+            {"tag_name": "nightly-new", "published_at": "2026-05-03T00:00:00Z"},
+            {"tag_name": "nightly-middle", "published_at": "2026-05-02T00:00:00Z"}
+        ]"#;
+
+        let tag = latest_nightly_release_tag(json, "foundry-rs/foundry").unwrap();
+
+        assert_eq!(tag, "nightly-new");
+    }
+
+    #[test]
+    fn latest_nightly_release_tag_ignores_non_nightly_releases() {
+        let json = r#"[
+            {"tag_name": "v2.0.0", "published_at": "2026-06-01T00:00:00Z"},
+            {"tag_name": "stable", "published_at": "2026-06-02T00:00:00Z"},
+            {"tag_name": "nightly-abc", "published_at": "2026-05-01T00:00:00Z"}
+        ]"#;
+
+        let tag = latest_nightly_release_tag(json, "foundry-rs/foundry").unwrap();
+
+        assert_eq!(tag, "nightly-abc");
+    }
+
+    #[test]
+    fn latest_nightly_release_tag_errors_when_no_nightly_exists() {
+        let json = r#"[
+            {"tag_name": "v2.0.0", "published_at": "2026-06-01T00:00:00Z"}
+        ]"#;
+
+        let err = latest_nightly_release_tag(json, "foundry-rs/foundry").unwrap_err();
+
+        assert!(err.to_string().contains("could not find a nightly release tag"));
+    }
 
     #[test]
     fn attestation_de() {

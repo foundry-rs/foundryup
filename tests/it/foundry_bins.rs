@@ -59,6 +59,11 @@ foundryup: - chisel [..]
 fn install_stable() {
     test_install("stable");
 }
+// `latest` resolves to the newest non-prerelease tag via the GitHub API.
+#[test]
+fn install_latest() {
+    test_install("latest");
+}
 #[test]
 fn install_nightly() {
     test_install("nightly");

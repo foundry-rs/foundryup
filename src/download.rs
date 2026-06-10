@@ -28,6 +28,24 @@ impl PartialEq<&str> for GitHubHosts {
     }
 }
 
+/// Returns a GitHub token from the environment, if set, used to authenticate
+/// `api.github.com` requests so they use the higher authenticated rate limit.
+/// Checks `GITHUB_TOKEN` then `GH_TOKEN`; empty values are ignored.
+fn github_token() -> Option<String> {
+    ["GITHUB_TOKEN", "GH_TOKEN"]
+        .into_iter()
+        .find_map(|var| std::env::var(var).ok().filter(|t| !t.is_empty()))
+}
+
+/// Whether `url` points at the GitHub REST API over HTTPS, used to gate token
+/// attachment. Matches the origin exactly (scheme + host + port) so a token is
+/// never sent to lookalike hosts like `api.github.com.evil.com`.
+fn is_github_api_url(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str().is_some_and(|host| host.eq_ignore_ascii_case("api.github.com"))
+        && url.port_or_known_default() == Some(443)
+}
+
 pub(crate) struct Downloader {
     client: reqwest::Client,
 }
@@ -48,6 +66,7 @@ impl Downloader {
             });
 
         let client = reqwest::Client::builder()
+            .https_only(true)
             .user_agent(concat!("foundryup/", env!("CARGO_PKG_VERSION")))
             .retry(retry)
             .build()
@@ -56,8 +75,17 @@ impl Downloader {
     }
 
     async fn send(&self, url: &str) -> Result<reqwest::Response> {
-        let response =
-            self.client.get(url).send().await.wrap_err_with(|| format!("failed to GET {url}"))?;
+        let parsed = reqwest::Url::parse(url).wrap_err_with(|| format!("invalid URL {url}"))?;
+        // Only attach the token to GitHub API requests, never to release-download
+        // CDN hosts. reqwest also strips it on cross-host redirects.
+        let is_github_api = is_github_api_url(&parsed);
+        let mut request = self.client.get(parsed);
+        if is_github_api {
+            if let Some(token) = github_token() {
+                request = request.bearer_auth(token);
+            }
+        }
+        let response = request.send().await.wrap_err_with(|| format!("failed to GET {url}"))?;
         if !response.status().is_success() {
             bail!("failed to download {url}: HTTP {}", response.status());
         }
@@ -175,6 +203,21 @@ mod tests {
         for code in [200, 301, 400, 401, 404, 410] {
             assert!(!is_retryable_status(reqwest::StatusCode::from_u16(code).unwrap()));
         }
+    }
+
+    #[test]
+    fn github_api_url_gate_only_matches_exact_origin() {
+        let api = |u: &str| is_github_api_url(&reqwest::Url::parse(u).unwrap());
+        // Token is attached only for the exact api.github.com HTTPS origin.
+        assert!(api("https://api.github.com/repos/x/y/releases/latest"));
+        assert!(api("https://API.GITHUB.COM/repos/x/y"));
+        assert!(api("https://api.github.com:443/repos/x/y"));
+        // Lookalikes, userinfo tricks, other hosts and schemes are rejected.
+        assert!(!api("https://api.github.com.evil.com/"));
+        assert!(!api("https://api.github.com@evil.com/"));
+        assert!(!api("http://api.github.com/"));
+        assert!(!api("https://github.com/foundry-rs/foundry/releases/download/v1/x"));
+        assert!(!api("https://objects.githubusercontent.com/x"));
     }
 
     #[test]
