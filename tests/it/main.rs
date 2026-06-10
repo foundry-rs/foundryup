@@ -88,11 +88,11 @@ Options:
           
           [possible values: bash, elvish, fish, powershell, zsh]
 
-  -h, --help
-          Print help (see a summary with '-h')
-
   -V, --version
           Print version
+
+  -h, --help
+          Print help (see a summary with '-h')
 
 "#]]);
 }
@@ -100,6 +100,21 @@ Options:
 #[test]
 fn version() {
     foundryup().arg("--version").assert().success().stdout_eq(str![[r#"
+foundryup [..]
+"#]]);
+}
+
+#[test]
+fn version_short() {
+    foundryup().arg("-V").assert().success().stdout_eq(str![[r#"
+foundryup [..]
+"#]]);
+}
+
+// `-v` is an alias for `--version`.
+#[test]
+fn version_short_alias() {
+    foundryup().arg("-v").assert().success().stdout_eq(str![[r#"
 foundryup [..]
 "#]]);
 }
@@ -141,6 +156,59 @@ fn use_nonexistent_version() {
 [..]version nonexistent-version not installed[..]
 ...
 "#]]);
+}
+
+// `--use` normalizes a bare semver (e.g. `1.5.0`) to the `v1.5.0` directory.
+#[test]
+fn use_version_normalizes_bare_semver() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+    let version_dir = foundry_dir.join("versions/foundry-rs/foundry/v1.5.0");
+    std::fs::create_dir_all(&version_dir).unwrap();
+
+    for bin in BINS {
+        let bin_path = version_dir.join(format!("{bin}{EXE_SUFFIX}"));
+        std::fs::write(&bin_path, "fake binary").unwrap();
+    }
+
+    foundryup()
+        .env("FOUNDRY_DIR", &foundry_dir)
+        .args(["--use", "1.5.0"])
+        .assert()
+        .success()
+        .stderr_eq(str![[r#"
+...
+[..]use - forge[..]
+...
+"#]]);
+
+    for &bin in BINS {
+        let name = format!("{bin}{EXE_SUFFIX}");
+        assert!(foundry_dir.join("bin").join(&name).exists(), "{name} was not activated");
+    }
+}
+
+// On unix, `--use` activates a version by symlinking it into the bin dir.
+#[cfg(unix)]
+#[test]
+fn use_version_creates_symlink_on_unix() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+    let version_dir = foundry_dir.join("versions/foundry-rs/foundry/v1.5.0");
+    std::fs::create_dir_all(&version_dir).unwrap();
+
+    for bin in BINS {
+        std::fs::write(version_dir.join(bin), "fake binary").unwrap();
+    }
+
+    foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["--use", "1.5.0"]).assert().success();
+
+    for &bin in BINS {
+        let dest = foundry_dir.join("bin").join(bin);
+        let meta = std::fs::symlink_metadata(&dest).unwrap();
+        assert!(meta.file_type().is_symlink(), "{bin} should be a symlink");
+        assert_eq!(std::fs::read_link(&dest).unwrap(), version_dir.join(bin));
+    }
 }
 
 #[test]
@@ -227,6 +295,11 @@ foundryup: - chisel [..]
 #[test]
 fn install_stable() {
     test_install("stable");
+}
+// `latest` resolves to the newest non-prerelease tag via the GitHub API.
+#[test]
+fn install_latest() {
+    test_install("latest");
 }
 #[test]
 fn install_nightly() {
