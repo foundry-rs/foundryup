@@ -13,15 +13,22 @@ pub(crate) struct Cli {
     pub update: bool,
 
     /// Build and install from a remote GitHub repo (uses default branch if no other options)
-    #[arg(short = 'r', long)]
+    #[arg(short = 'r', long, env = "FOUNDRYUP_REPO", hide_env = true)]
     pub repo: Option<String>,
 
     /// Build and install a specific branch
-    #[arg(short = 'b', long, conflicts_with = "pr")]
+    #[arg(short = 'b', long, conflicts_with = "pr", env = "FOUNDRYUP_BRANCH", hide_env = true)]
     pub branch: Option<String>,
 
     /// Install a specific version from built binaries (e.g., stable, nightly, 0.3.0)
-    #[arg(id = "ver", short = 'i', long = "install", value_name = "VERSION")]
+    #[arg(
+        id = "ver",
+        short = 'i',
+        long = "install",
+        value_name = "VERSION",
+        env = "FOUNDRYUP_VERSION",
+        hide_env = true
+    )]
     pub version: Option<String>,
 
     /// List installed versions
@@ -33,19 +40,19 @@ pub(crate) struct Cli {
     pub use_version: Option<String>,
 
     /// Build and install a local repository
-    #[arg(short = 'p', long)]
+    #[arg(short = 'p', long, env = "FOUNDRYUP_LOCAL_REPO", hide_env = true)]
     pub path: Option<std::path::PathBuf>,
 
     /// Build and install a specific Pull Request
-    #[arg(short = 'P', long, conflicts_with = "branch")]
+    #[arg(short = 'P', long, conflicts_with = "branch", env = "FOUNDRYUP_PR", hide_env = true)]
     pub pr: Option<u64>,
 
     /// Build and install a specific commit
-    #[arg(short = 'C', long)]
+    #[arg(short = 'C', long, env = "FOUNDRYUP_COMMIT", hide_env = true)]
     pub commit: Option<String>,
 
     /// Number of CPUs to use for building (default: all)
-    #[arg(short = 'j', long)]
+    #[arg(short = 'j', long, env = "FOUNDRYUP_JOBS", hide_env = true)]
     pub jobs: Option<u32>,
 
     /// Cargo profile to use for building
@@ -57,7 +64,7 @@ pub(crate) struct Cli {
     pub cargo_features: Option<String>,
 
     /// [deprecated] Install binaries for a specific network
-    #[arg(short = 'n', long, hide = true)]
+    #[arg(short = 'n', long, hide = true, env = "FOUNDRYUP_NETWORK", hide_env = true)]
     pub network: Option<String>,
 
     /// Skip SHA verification (INSECURE)
@@ -65,11 +72,11 @@ pub(crate) struct Cli {
     pub force: bool,
 
     /// Install a specific architecture (amd64, arm64)
-    #[arg(long)]
+    #[arg(long, env = "FOUNDRYUP_ARCH", hide_env = true)]
     pub arch: Option<String>,
 
     /// Install a specific platform (win32, linux, darwin, alpine)
-    #[arg(long)]
+    #[arg(long, env = "FOUNDRYUP_PLATFORM", hide_env = true)]
     pub platform: Option<String>,
 
     /// Generate shell completions

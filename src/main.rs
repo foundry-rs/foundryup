@@ -23,7 +23,24 @@ mod self_update;
 use cli::Cli;
 use config::Config;
 
+/// Removes empty `FOUNDRYUP_*` variables before clap parses them.
+///
+/// clap's `env` support captures `Some("")` and parses it as a real value (e.g.
+/// an empty version, or a non-numeric `FOUNDRYUP_JOBS` that fails parsing), so an
+/// empty variable is cleared here and treated as unset.
+fn clear_empty_foundryup_env() {
+    // `vars_os` is a snapshot, so removing during iteration is safe.
+    for (key, value) in std::env::vars_os() {
+        if value.is_empty() && key.to_str().is_some_and(|key| key.starts_with("FOUNDRYUP_")) {
+            // SAFETY: runs at startup before any threads are spawned.
+            unsafe { std::env::remove_var(&key) };
+        }
+    }
+}
+
 fn main() -> Result<()> {
+    clear_empty_foundryup_env();
+
     color_eyre::install()?;
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -70,7 +87,8 @@ async fn run(cli: Cli) -> Result<()> {
     if cli.list {
         install::list(&config)?;
     } else if let Some(ref version) = cli.use_version {
-        install::use_version_resolved(&config, config.network.repo, version).await?;
+        let repo = cli.repo.as_deref().unwrap_or(config.network.repo);
+        install::use_version_resolved(&config, repo, version).await?;
     } else {
         print_banner();
         process::check_bins_in_use(&config)?;

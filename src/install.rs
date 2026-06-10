@@ -48,8 +48,16 @@ async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
         format!("https://github.com/{}/releases/download/{tag}/", config.network.repo);
 
     let hashes = if config.network.has_attestation && !args.force {
-        fetch_and_verify_attestation(config, repo, &downloader, &release_url, &version, &target)
-            .await?
+        fetch_and_verify_attestation(
+            config,
+            repo,
+            &downloader,
+            &release_url,
+            &version,
+            &tag,
+            &target,
+        )
+        .await?
     } else if args.force {
         say!("skipped SHA verification due to --force flag");
         None
@@ -75,6 +83,12 @@ async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> R
     if args.repo.is_some() || args.branch.is_some() || args.version.is_some() {
         warn!("--branch, --install, --use, and --repo arguments are ignored during local install");
     }
+
+    // Resolve to an absolute path so the symlinks below point at the build
+    // artifacts regardless of the current working directory.
+    let local_path = fs::canonicalize(local_path)
+        .wrap_err_with(|| format!("local repository not found: {}", local_path.display()))?;
+    let local_path = local_path.as_path();
 
     say!("installing from {}", local_path.display());
 
@@ -103,9 +117,7 @@ async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> R
         let src = local_path.join("target").join(target_dir).join(bin_name(bin));
         let dest = config.bin_path(bin);
 
-        if dest.exists() {
-            fs::remove_file(&dest)?;
-        }
+        remove_if_exists(&dest)?;
 
         #[cfg(unix)]
         std::os::unix::fs::symlink(&src, &dest)?;
@@ -211,10 +223,18 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
     fs::create_dir_all(&version_dir)?;
 
     let target_dir = profile_target_dir(&args.cargo_profile);
+    let build_dir = repo_path.join("target").join(target_dir);
     for bin in config.network.bins {
-        let src = repo_path.join("target").join(target_dir).join(bin_name(bin));
-        if src.exists() {
-            fs::rename(&src, version_dir.join(bin_name(bin)))?;
+        // Move whichever artifact cargo produced (with or without `.exe`).
+        for candidate in [bin.to_string(), format!("{bin}.exe")] {
+            let src = build_dir.join(&candidate);
+            if src.is_file() {
+                // Remove any existing destination first; `fs::rename` fails on
+                // Windows if the target already exists.
+                let dest = version_dir.join(&candidate);
+                remove_if_exists(&dest)?;
+                fs::rename(&src, &dest)?;
+            }
         }
     }
 
@@ -264,10 +284,11 @@ async fn fetch_and_verify_attestation(
     downloader: &Downloader,
     release_url: &str,
     version: &str,
+    tag: &str,
     target: &Target,
 ) -> Result<Option<HashMap<String, String>>> {
     let bins = config.network.bins;
-    say!("checking if {} for {version} version are already installed", bins.join(", "));
+    say!("checking if {} for {tag} version are already installed", bins.join(", "));
 
     let attestation_url = format!(
         "{release_url}foundry_{version}_{platform}_{arch}.attestation.txt",
@@ -290,14 +311,14 @@ async fn fetch_and_verify_attestation(
         }
     };
 
-    say!("found attestation for {version} version, downloading attestation artifact, checking...");
+    say!("found attestation for {tag} version, downloading attestation artifact, checking...");
 
     let artifact_url = format!("{attestation_link}/download");
     let artifact_json = downloader.download_to_string(&artifact_url).await?;
 
     let hashes = parse_attestation_payload(&artifact_json)?;
 
-    let version_dir = config.version_dir(repo, version);
+    let version_dir = config.version_dir(repo, tag);
 
     if version_dir.exists() {
         let mut all_match = true;
@@ -322,8 +343,8 @@ async fn fetch_and_verify_attestation(
         }
 
         if all_match {
-            say!("version {version} already installed and verified, activating...");
-            use_version(config, repo, version)?;
+            say!("version {tag} already installed and verified, activating...");
+            use_version(config, repo, tag)?;
             say!("done!");
             std::process::exit(0);
         }
@@ -578,9 +599,7 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
 
         let old_version = if dest.exists() { get_bin_version(&dest).ok() } else { None };
 
-        if dest.exists() {
-            fs::remove_file(&dest)?;
-        }
+        remove_if_exists(&dest)?;
 
         #[cfg(unix)]
         std::os::unix::fs::symlink(&src, &dest)?;
@@ -685,7 +704,9 @@ fn latest_nightly_release_tag(json: &str, repo: &str) -> Result<String> {
 }
 
 fn normalize_version(version: &str) -> (String, String) {
-    if version.starts_with("nightly") {
+    // Only concrete `nightly-<sha>` tags map to the nightly channel here; the
+    // bare `nightly` channel is resolved earlier.
+    if version.starts_with("nightly-") {
         ("nightly".to_string(), version.to_string())
     } else if version.starts_with(|c: char| c.is_ascii_digit()) {
         let s = format!("v{version}");
@@ -699,6 +720,19 @@ fn bin_name(name: &str) -> String {
     if cfg!(windows) { format!("{name}.exe") } else { name.to_string() }
 }
 
+/// Removes `path` if it exists, including dangling symlinks.
+///
+/// Uses `symlink_metadata` so a broken symlink is still detected and removed;
+/// `Path::exists()` follows symlinks and reports `false` for one, which would
+/// leave it in place and make a following `symlink`/`copy` fail.
+fn remove_if_exists(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => fs::remove_file(path).map_err(Into::into),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn get_bin_version(path: &Path) -> Result<String> {
     let output = std::process::Command::new(path).arg("-V").output()?;
     let version = String::from_utf8_lossy(&output.stdout);
@@ -706,7 +740,11 @@ fn get_bin_version(path: &Path) -> Result<String> {
 }
 
 fn rustflags() -> String {
-    std::env::var("RUSTFLAGS").unwrap_or_else(|_| "-C target-cpu=native".to_string())
+    // Treat an empty `RUSTFLAGS` the same as unset.
+    std::env::var("RUSTFLAGS")
+        .ok()
+        .filter(|flags| !flags.is_empty())
+        .unwrap_or_else(|| "-C target-cpu=native".to_string())
 }
 
 #[cfg(test)]
@@ -749,6 +787,28 @@ mod tests {
         let err = latest_nightly_release_tag(json, "foundry-rs/foundry").unwrap_err();
 
         assert!(err.to_string().contains("could not find a nightly release tag"));
+    }
+
+    #[test]
+    fn normalize_version_cases() {
+        // `nightly-<sha>` -> asset version "nightly", tag is the literal sha tag.
+        assert_eq!(
+            normalize_version("nightly-abc123"),
+            ("nightly".to_string(), "nightly-abc123".to_string())
+        );
+        // Bare semver gets a `v` prefix for both asset version and tag.
+        assert_eq!(normalize_version("1.5.0"), ("v1.5.0".to_string(), "v1.5.0".to_string()));
+        assert_eq!(normalize_version("v1.5.0"), ("v1.5.0".to_string(), "v1.5.0".to_string()));
+        // Arbitrary `nightly*` strings are not the nightly channel.
+        assert_eq!(
+            normalize_version("nightlyfoo"),
+            ("nightlyfoo".to_string(), "nightlyfoo".to_string())
+        );
+        // Branch/custom names pass through untouched.
+        assert_eq!(
+            normalize_version("foundry-rs-branch-master"),
+            ("foundry-rs-branch-master".to_string(), "foundry-rs-branch-master".to_string())
+        );
     }
 
     #[test]
