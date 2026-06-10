@@ -243,4 +243,3 @@ foundryup: migrating legacy version [..]
     assert!(versions_dir.join("foundry-rs/foundry/nightly").exists());
     assert!(versions_dir.join("foundry-rs/foundry/stable").exists());
 }
-
