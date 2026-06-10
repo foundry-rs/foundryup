@@ -1,27 +1,14 @@
 use snapbox::{cmd::Command, str};
-use std::{env::consts::EXE_SUFFIX, path::Path};
+use std::env::consts::EXE_SUFFIX;
 
 const BINS: &[&str] = &["forge", "cast", "anvil", "chisel"];
 
+mod foundry_bins;
 mod installer_script;
 mod self_update;
 
 fn foundryup() -> Command {
     Command::new(snapbox::cmd::cargo_bin!("foundryup")).env("NO_COLOR", "1")
-}
-
-fn run_forge_test(foundry_dir: &Path, temp_dir: &Path) {
-    let forge = foundry_dir.join(format!("bin/forge{EXE_SUFFIX}"));
-
-    Command::new(&forge).arg("--version").assert().success().stdout_eq(str![[r#"
-forge [..]
-...
-"#]]);
-
-    Command::new(&forge).args(["init", "test-project"]).current_dir(temp_dir).assert().success();
-    let project_dir = temp_dir.join("test-project");
-
-    Command::new(&forge).arg("test").current_dir(&project_dir).assert().success();
 }
 
 #[test]
@@ -187,96 +174,4 @@ foundryup: migrating legacy version [..]
     assert!(!versions_dir.join("stable").exists());
     assert!(versions_dir.join("foundry-rs/foundry/nightly").exists());
     assert!(versions_dir.join("foundry-rs/foundry/stable").exists());
-}
-
-fn test_install(version: &str) {
-    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
-    let foundry_dir = temp_dir.path().join(".foundry");
-
-    foundryup()
-        .env("FOUNDRY_DIR", &foundry_dir)
-        .args(["-i", version])
-        .assert()
-        .success()
-        .stderr_eq(str![[r#"
-...
-[..]done!
-...
-"#]]);
-
-    for &bin in BINS {
-        let name = format!("{bin}{EXE_SUFFIX}");
-        assert!(foundry_dir.join("bin").join(&name).exists(), "{name} does not exist");
-    }
-
-    run_forge_test(&foundry_dir, temp_dir.path());
-
-    foundryup().env("FOUNDRY_DIR", &foundry_dir).arg("--list").assert().success().stderr_eq(str![
-        [r#"
-foundryup: foundry-rs/foundry [..]
-foundryup: - forge [..]
-foundryup: - cast [..]
-foundryup: - anvil [..]
-foundryup: - chisel [..]
-
-...
-"#]
-    ]);
-}
-
-#[test]
-fn install_stable() {
-    test_install("stable");
-}
-#[test]
-fn install_nightly() {
-    test_install("nightly");
-}
-#[test]
-fn install_v1_5_0() {
-    test_install("v1.5.0");
-}
-#[test]
-fn install_1_5_0() {
-    test_install("1.5.0");
-}
-
-#[test]
-fn use_version() {
-    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
-    let foundry_dir = temp_dir.path().join(".foundry");
-
-    foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["-i", "stable"]).assert().success();
-
-    foundryup()
-        .env("FOUNDRY_DIR", &foundry_dir)
-        .args(["--use", "stable"])
-        .assert()
-        .success()
-        .stderr_eq(str![[r#"
-...
-[..]use - forge [..]
-...
-"#]]);
-}
-
-#[test]
-fn reinstall_uses_cache() {
-    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
-    let foundry_dir = temp_dir.path().join(".foundry");
-
-    foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["-i", "stable"]).assert().success();
-
-    foundryup()
-        .env("FOUNDRY_DIR", &foundry_dir)
-        .args(["-i", "stable"])
-        .assert()
-        .success()
-        .stderr_eq(str![[r#"
-...
-[..]already installed and verified[..]
-...
-[..]done!
-...
-"#]]);
 }

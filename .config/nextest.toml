@@ -9,5 +9,5 @@ slow-timeout = { period = "30s", terminate-after = 3 }
 foundry-bins = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'test(/install_/) | test(reinstall_uses_cache) | test(use_version)'
+filter = 'test(/^foundry_bins::/)'
 test-group = 'foundry-bins'
