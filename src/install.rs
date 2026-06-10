@@ -219,7 +219,41 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
     }
 
     use_version(config, repo, &version)?;
+
+    generate_manpages_from_source(config).await?;
+
     say!("done");
+
+    Ok(())
+}
+
+/// Generates man pages from the freshly built binaries using `help2man`,
+/// writing each `<bin>.1` into the man directory. Skipped when `help2man` is
+/// not installed.
+async fn generate_manpages_from_source(config: &Config) -> Result<()> {
+    if which::which("help2man").is_err() {
+        return Ok(());
+    }
+
+    for bin in config.network.bins {
+        let bin_path = config.bin_path(bin);
+        let man_path = config.man_dir.join(format!("{bin}.1"));
+
+        // Create/truncate the destination first, matching the shell's `> file`.
+        let man_file = fs::File::create(&man_path)?;
+
+        let status = tokio::process::Command::new("help2man")
+            .arg("-N")
+            .arg(&bin_path)
+            .stdout(std::process::Stdio::from(man_file.into_parts().0))
+            .status()
+            .await
+            .wrap_err_with(|| format!("failed to run help2man for {bin}"))?;
+
+        if !status.success() {
+            bail!("help2man failed for {bin}");
+        }
+    }
 
     Ok(())
 }
