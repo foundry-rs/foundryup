@@ -5,8 +5,22 @@ use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 use std::{io::Write, path::Path};
 
-/// Number of retries (after the initial attempt) for transient HTTP failures.
-const MAX_RETRIES: u32 = 5;
+/// Default number of retries (after the initial attempt) for transient HTTP
+/// failures, used when `FOUNDRYUP_MAX_RETRIES` is unset or unparseable.
+const DEFAULT_MAX_RETRIES: u32 = 5;
+
+/// Number of retries for transient HTTP failures, honoring the
+/// `FOUNDRYUP_MAX_RETRIES` environment variable (matching the install script).
+///
+/// The script's `FOUNDRYUP_RETRY_DELAY` / `FOUNDRYUP_RETRY_MAX_TIME` are not
+/// supported here: reqwest's retry layer manages its own backoff and does not
+/// expose delay or total-time knobs.
+fn max_retries() -> u32 {
+    std::env::var("FOUNDRYUP_MAX_RETRIES")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_MAX_RETRIES)
+}
 
 /// Transient HTTP statuses that may recover on retry (e.g. GitHub rate limiting
 /// or temporary outages). Other errors (e.g. 404) are treated as permanent.
@@ -56,7 +70,7 @@ impl Downloader {
         // otherwise block retries on a CLI that issues only a few requests.
         let retry = reqwest::retry::for_host(GitHubHosts)
             .no_budget()
-            .max_retries_per_request(MAX_RETRIES)
+            .max_retries_per_request(max_retries())
             .classify_fn(|req_rep| {
                 if req_rep.error().is_some() || req_rep.status().is_some_and(is_retryable_status) {
                     req_rep.retryable()

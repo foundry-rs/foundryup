@@ -3,7 +3,7 @@ use crate::{
     config::Config,
     download::{Downloader, compute_sha256, extract_tar_gz, extract_zip},
     platform::{Platform, Target},
-    say, warn,
+    say, tell, warn,
 };
 use eyre::{Result, WrapErr, bail};
 use fs_err as fs;
@@ -549,18 +549,18 @@ pub(crate) fn list(config: &Config) -> Result<()> {
                     let version_name = version_entry.file_name();
                     let version_name = version_name.to_string_lossy();
 
-                    say!("{owner_name}/{repo_name} {version_name}");
+                    tell!("{owner_name}/{repo_name} {version_name}");
 
                     for bin in bins {
                         let bin_path = version_path.join(bin_name(bin));
                         if bin_path.exists() {
                             match get_bin_version(&bin_path) {
-                                Ok(v) => say!("- {v}"),
-                                Err(_) => say!("- {bin} (unknown version)"),
+                                Ok(v) => tell!("- {v}"),
+                                Err(_) => tell!("- {bin} (unknown version)"),
                             }
                         }
                     }
-                    eprintln!();
+                    println!();
                 }
             }
         }
@@ -569,8 +569,8 @@ pub(crate) fn list(config: &Config) -> Result<()> {
             let bin_path = config.bin_path(bin);
             if bin_path.exists() {
                 match get_bin_version(&bin_path) {
-                    Ok(v) => say!("- {v}"),
-                    Err(_) => say!("- {bin} (unknown version)"),
+                    Ok(v) => tell!("- {v}"),
+                    Err(_) => tell!("- {bin} (unknown version)"),
                 }
             }
         }
