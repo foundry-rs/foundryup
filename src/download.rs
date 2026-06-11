@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{io::Write, path::Path};
 
 /// Default number of retries (after the initial attempt) for transient HTTP
-/// failures, used when `FOUNDRYUP_MAX_RETRIES` is unset or unparseable.
+/// failures, used when `FOUNDRYUP_MAX_RETRIES` is unset or unparsable.
 const DEFAULT_MAX_RETRIES: u32 = 5;
 
 /// Number of retries for transient HTTP failures, honoring the
