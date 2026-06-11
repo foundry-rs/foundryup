@@ -336,7 +336,7 @@ async fn fetch_and_verify_attestation(
             let path = version_dir.join(&bin_name);
 
             match expected {
-                Some(expected_hash) if path.exists() => {
+                Some(expected_hash) if is_executable(&path) => {
                     let actual = compute_sha256(&path)?;
                     if actual != *expected_hash {
                         all_match = false;
@@ -458,7 +458,7 @@ fn verify_installed_binaries(
                 failed = true;
             }
             Some(expected_hash) => {
-                if !path.exists() {
+                if !is_executable(&path) {
                     say!("binary {bin} not found at {}", path.display());
                     failed = true;
                     continue;
@@ -602,8 +602,8 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
         let src = version_dir.join(&bin_name);
         let dest = config.bin_path(bin);
 
-        if !src.exists() {
-            continue;
+        if !src.is_file() {
+            bail!("binary {bin} not found in version {version} at {}", src.display());
         }
 
         let old_version = if dest.exists() { get_bin_version(&dest).ok() } else { None };
@@ -615,12 +615,11 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
         #[cfg(not(unix))]
         fs::copy(&src, &dest)?;
 
-        match get_bin_version(&dest) {
-            Ok(v) => match old_version {
-                Some(old) if old != v => say!("use - {v} (from {old})"),
-                _ => say!("use - {v}"),
-            },
-            Err(_) => say!("use - {bin}"),
+        let v = get_bin_version(&dest)
+            .wrap_err_with(|| format!("failed to run {bin} after activating version {version}"))?;
+        match old_version {
+            Some(old) if old != v => say!("use - {v} (from {old})"),
+            _ => say!("use - {v}"),
         }
 
         if let Ok(which_path) = which::which(bin) {
@@ -747,8 +746,29 @@ fn remove_if_exists(path: &Path) -> Result<()> {
     }
 }
 
+/// Returns whether `path` is an existing file that is executable.
+///
+/// On Unix this requires at least one executable permission bit. On Windows
+/// executability is not a permission bit, so existence is sufficient.
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path)
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
 fn get_bin_version(path: &Path) -> Result<String> {
     let output = std::process::Command::new(path).arg("-V").output()?;
+    if !output.status.success() {
+        bail!("`{} -V` exited with {}", path.display(), output.status);
+    }
     let version = String::from_utf8_lossy(&output.stdout);
     Ok(version.trim().to_string())
 }

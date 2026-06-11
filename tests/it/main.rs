@@ -11,6 +11,16 @@ fn foundryup() -> Command {
     Command::new(snapbox::cmd::cargo_bin!("foundryup")).env("NO_COLOR", "1")
 }
 
+/// Writes an executable stub binary at `path`.
+///
+/// Activation now runs `<bin> -V` and fails if it cannot execute, so test
+/// fixtures need real executables rather than placeholder text. We reuse the
+/// `foundryup` test binary, which exits 0 and prints a version for `-V` on every
+/// platform (and copying it preserves the executable bit on Unix).
+fn write_fake_bin(path: &std::path::Path) {
+    std::fs::copy(snapbox::cmd::cargo_bin!("foundryup"), path).unwrap();
+}
+
 #[test]
 fn help() {
     foundryup().arg("--help").assert().success().stdout_eq(str![[r#"
@@ -155,7 +165,7 @@ fn use_version_normalizes_bare_semver() {
 
     for bin in BINS {
         let bin_path = version_dir.join(format!("{bin}{EXE_SUFFIX}"));
-        std::fs::write(&bin_path, "fake binary").unwrap();
+        write_fake_bin(&bin_path);
     }
 
     foundryup()
@@ -165,7 +175,7 @@ fn use_version_normalizes_bare_semver() {
         .success()
         .stderr_eq(str![[r#"
 ...
-[..]use - forge[..]
+[..]use - [..]
 ...
 "#]]);
 
@@ -185,7 +195,7 @@ fn use_version_creates_symlink_on_unix() {
     std::fs::create_dir_all(&version_dir).unwrap();
 
     for bin in BINS {
-        std::fs::write(version_dir.join(bin), "fake binary").unwrap();
+        write_fake_bin(&version_dir.join(bin));
     }
 
     foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["--use", "1.5.0"]).assert().success();
