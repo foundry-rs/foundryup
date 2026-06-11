@@ -80,6 +80,8 @@ async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
 }
 
 async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> Result<()> {
+    need_cmd("cargo")?;
+
     if args.repo.is_some() || args.branch.is_some() || args.version.is_some() {
         warn!("--branch, --install, --use, and --repo arguments are ignored during local install");
     }
@@ -134,6 +136,9 @@ fn profile_target_dir(profile: &str) -> &str {
 }
 
 async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<()> {
+    need_cmd("git")?;
+    need_cmd("cargo")?;
+
     let branch = if let Some(pr) = args.pr {
         format!("refs/pull/{pr}/head")
     } else {
@@ -719,6 +724,11 @@ fn normalize_version(version: &str) -> (String, String) {
 
 fn bin_name(name: &str) -> String {
     if cfg!(windows) { format!("{name}.exe") } else { name.to_string() }
+}
+
+/// Fails with a clear error if `cmd` is not available on `PATH`.
+fn need_cmd(cmd: &str) -> Result<()> {
+    which::which(cmd).map(|_| ()).map_err(|_| eyre::eyre!("need '{cmd}' (command not found)"))
 }
 
 /// Removes `path` if it exists, including dangling symlinks.

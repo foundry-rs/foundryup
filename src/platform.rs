@@ -56,26 +56,21 @@ pub(crate) enum Arch {
 }
 
 impl Arch {
-    pub(crate) fn detect() -> Result<Self> {
-        let arch = std::env::consts::ARCH;
-        match arch {
-            "x86_64" => {
-                if is_rosetta() {
-                    Ok(Self::Arm64)
-                } else {
-                    Ok(Self::Amd64)
-                }
-            }
-            "aarch64" | "arm64" => Ok(Self::Arm64),
-            _ => bail!("unsupported architecture: {arch}"),
-        }
+    pub(crate) fn detect() -> Self {
+        Self::normalize(std::env::consts::ARCH)
     }
 
-    pub(crate) fn from_str(s: &str) -> Result<Self> {
+    pub(crate) fn from_str(s: &str) -> Self {
+        Self::normalize(s)
+    }
+
+    /// Normalizes an arch name, defaulting to `amd64` for anything unrecognized.
+    /// A literal `x86_64` resolves to `arm64` when running under Rosetta.
+    fn normalize(s: &str) -> Self {
         match s.to_lowercase().as_str() {
-            "amd64" | "x86_64" | "x64" => Ok(Self::Amd64),
-            "arm64" | "aarch64" => Ok(Self::Arm64),
-            _ => bail!("unsupported architecture: {s}"),
+            "x86_64" if is_rosetta() => Self::Arm64,
+            "arm64" | "aarch64" => Self::Arm64,
+            _ => Self::Amd64,
         }
     }
 
@@ -103,8 +98,8 @@ impl Target {
             None => Platform::detect()?,
         };
         let arch = match arch_override {
-            Some(a) => Arch::from_str(a)?,
-            None => Arch::detect()?,
+            Some(a) => Arch::from_str(a),
+            None => Arch::detect(),
         };
         Ok(Self { platform, arch })
     }
@@ -155,9 +150,14 @@ mod tests {
 
     #[test]
     fn arch_from_str_cases() {
-        assert_eq!(Arch::from_str("amd64").unwrap(), Arch::Amd64);
-        assert_eq!(Arch::from_str("x86_64").unwrap(), Arch::Amd64);
-        assert_eq!(Arch::from_str("arm64").unwrap(), Arch::Arm64);
-        assert_eq!(Arch::from_str("aarch64").unwrap(), Arch::Arm64);
+        assert_eq!(Arch::from_str("amd64"), Arch::Amd64);
+        assert_eq!(Arch::from_str("arm64"), Arch::Arm64);
+        assert_eq!(Arch::from_str("aarch64"), Arch::Arm64);
+        // Unknown values fall back to amd64 rather than erroring.
+        assert_eq!(Arch::from_str("riscv64"), Arch::Amd64);
+        // `x86_64` is amd64 unless running under Rosetta (not the case in tests).
+        if !super::is_rosetta() {
+            assert_eq!(Arch::from_str("x86_64"), Arch::Amd64);
+        }
     }
 }
