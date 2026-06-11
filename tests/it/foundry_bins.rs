@@ -42,7 +42,7 @@ fn test_install(version: &str) {
 
     run_forge_test(&foundry_dir, temp_dir.path());
 
-    foundryup().env("FOUNDRY_DIR", &foundry_dir).arg("--list").assert().success().stderr_eq(str![
+    foundryup().env("FOUNDRY_DIR", &foundry_dir).arg("--list").assert().success().stdout_eq(str![
         [r#"
 foundryup: foundry-rs/foundry [..]
 foundryup: - forge [..]
