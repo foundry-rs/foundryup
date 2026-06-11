@@ -301,8 +301,11 @@ async fn fetch_and_verify_attestation(
         arch = target.arch.as_str()
     );
 
-    let attestation_link = match downloader.download_to_string(&attestation_url).await {
-        Ok(content) => {
+    // A 404 (genuinely absent attestation) skips verification. Transport failures and other HTTP
+    // errors are propagated so a network blip aborts the install rather than silently
+    // downgrading to an unverified binary.
+    let attestation_link = match downloader.download_to_string_optional(&attestation_url).await? {
+        Some(content) => {
             let link = content.lines().next().unwrap_or("").trim().to_string();
             if link.is_empty() || link.contains("Not Found") {
                 say!("no attestation found for this release, skipping SHA verification");
@@ -310,7 +313,7 @@ async fn fetch_and_verify_attestation(
             }
             link
         }
-        Err(_) => {
+        None => {
             say!("no attestation found for this release, skipping SHA verification");
             return Ok(None);
         }
