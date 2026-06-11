@@ -198,6 +198,22 @@ fn use_version_creates_symlink_on_unix() {
     }
 }
 
+// Empty `FOUNDRYUP_*` env vars are treated as unset, so an empty `FOUNDRYUP_JOBS`
+// must not fail clap's `u32` parsing.
+#[test]
+fn empty_foundryup_env_is_ignored() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+
+    foundryup()
+        .env("FOUNDRY_DIR", temp_dir.path().join(".foundry"))
+        .env("FOUNDRYUP_JOBS", "")
+        .env("FOUNDRYUP_VERSION", "")
+        .env("FOUNDRYUP_PR", "")
+        .arg("--list")
+        .assert()
+        .success();
+}
+
 #[test]
 fn list_empty() {
     let temp_dir = tempfile::Builder::new().tempdir().unwrap();

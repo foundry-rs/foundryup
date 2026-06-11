@@ -25,9 +25,9 @@ impl Platform {
         match s.to_lowercase().as_str() {
             "linux" => Ok(Self::Linux),
             "alpine" => Ok(Self::Alpine),
-            "darwin" | "macos" | "mac" => Ok(Self::Darwin),
-            "win32" | "windows" => Ok(Self::Win32),
-            s if s.starts_with("mingw") => Ok(Self::Win32),
+            "darwin" => Ok(Self::Darwin),
+            s if s.starts_with("mac") => Ok(Self::Darwin),
+            s if s.starts_with("mingw") || s.starts_with("win") => Ok(Self::Win32),
             _ => bail!("unsupported platform: {s}"),
         }
     }
@@ -133,4 +133,31 @@ fn is_rosetta() -> bool {
     }
     #[cfg(not(target_os = "macos"))]
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn platform_from_str_cases() {
+        assert_eq!(Platform::from_str("darwin").unwrap(), Platform::Darwin);
+        assert_eq!(Platform::from_str("Darwin").unwrap(), Platform::Darwin);
+        assert_eq!(Platform::from_str("macos").unwrap(), Platform::Darwin);
+        assert_eq!(Platform::from_str("mac").unwrap(), Platform::Darwin);
+        assert_eq!(Platform::from_str("linux").unwrap(), Platform::Linux);
+        assert_eq!(Platform::from_str("alpine").unwrap(), Platform::Alpine);
+        assert_eq!(Platform::from_str("win32").unwrap(), Platform::Win32);
+        assert_eq!(Platform::from_str("windows").unwrap(), Platform::Win32);
+        assert_eq!(Platform::from_str("mingw64_nt").unwrap(), Platform::Win32);
+        assert!(Platform::from_str("solaris").is_err());
+    }
+
+    #[test]
+    fn arch_from_str_cases() {
+        assert_eq!(Arch::from_str("amd64").unwrap(), Arch::Amd64);
+        assert_eq!(Arch::from_str("x86_64").unwrap(), Arch::Amd64);
+        assert_eq!(Arch::from_str("arm64").unwrap(), Arch::Arm64);
+        assert_eq!(Arch::from_str("aarch64").unwrap(), Arch::Arm64);
+    }
 }
