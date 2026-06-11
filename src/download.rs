@@ -86,6 +86,12 @@ impl Downloader {
             }
         }
         let response = request.send().await.wrap_err_with(|| format!("failed to GET {url}"))?;
+        Ok(response)
+    }
+
+    /// Sends a request and errors on any non-success HTTP status.
+    async fn send_ok(&self, url: &str) -> Result<reqwest::Response> {
+        let response = self.send(url).await?;
         if !response.status().is_success() {
             bail!("failed to download {url}: HTTP {}", response.status());
         }
@@ -93,7 +99,7 @@ impl Downloader {
     }
 
     pub(crate) async fn download_to_file(&self, url: &str, path: &Path) -> Result<()> {
-        let response = self.send(url).await?;
+        let response = self.send_ok(url).await?;
 
         let total_size = response.content_length();
 
@@ -136,8 +142,27 @@ impl Downloader {
     }
 
     pub(crate) async fn download_to_string(&self, url: &str) -> Result<String> {
-        let response = self.send(url).await?;
+        let response = self.send_ok(url).await?;
         response.text().await.wrap_err("failed to read response body")
+    }
+
+    /// Like [`download_to_string`](Self::download_to_string), but returns
+    /// `Ok(None)` when the server responds with HTTP 404 Not Found.
+    ///
+    /// Transport failures (DNS/TLS/connection errors) and other non-success
+    /// statuses are propagated as errors. A genuinely absent attestation (404) skips verification
+    /// while a transport failure aborts the install rather than silently downgrading to
+    /// an unverified binary.
+    pub(crate) async fn download_to_string_optional(&self, url: &str) -> Result<Option<String>> {
+        let response = self.send(url).await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            bail!("failed to download {url}: HTTP {}", response.status());
+        }
+        let body = response.text().await.wrap_err("failed to read response body")?;
+        Ok(Some(body))
     }
 }
 
