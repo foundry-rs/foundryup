@@ -66,34 +66,39 @@ async fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
+    let config = Arc::new(Config::new()?);
+
+    if cli.update {
+        return self_update::run(&config).await;
+    }
+
+    config.migrate_legacy_versions()?;
+
+    // `--list`/`--use` run offline: no update check or banner.
+    if cli.list {
+        return install::list(&config);
+    }
+
+    if let Some(ref version) = cli.use_version {
+        let repo = cli.repo.as_deref().unwrap_or(config.network.repo);
+        return install::use_version_resolved(&config, repo, version).await;
+    }
+
     if cli.network.is_some() {
         warn!(
             "the --network flag is deprecated and will be removed in a future release. Tempo is now included in the default Foundry installation."
         );
     }
 
-    let config = Arc::new(Config::new()?);
-    config.migrate_legacy_versions()?;
-
-    if cli.update {
-        return self_update::run(&config).await;
-    }
+    print_banner();
 
     let update_handle = tokio::spawn({
         let config = config.clone();
         async move { self_update::check_for_update(&config).await }
     });
 
-    if cli.list {
-        install::list(&config)?;
-    } else if let Some(ref version) = cli.use_version {
-        let repo = cli.repo.as_deref().unwrap_or(config.network.repo);
-        install::use_version_resolved(&config, repo, version).await?;
-    } else {
-        print_banner();
-        process::check_bins_in_use(&config)?;
-        install::run(&config, &cli).await?;
-    }
+    process::check_bins_in_use(&config)?;
+    install::run(&config, &cli).await?;
 
     print_update(update_handle.await?);
 
