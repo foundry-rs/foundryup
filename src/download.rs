@@ -260,6 +260,38 @@ mod tests {
     }
 
     #[test]
+    fn max_retries_honors_env_var() {
+        // Single test so the process-global env var can't race across threads.
+        let key = "FOUNDRYUP_MAX_RETRIES";
+        let original = std::env::var_os(key);
+
+        // Unset falls back to the default.
+        unsafe { std::env::remove_var(key) };
+        assert_eq!(max_retries(), DEFAULT_MAX_RETRIES);
+
+        // A custom value (with surrounding whitespace) is parsed.
+        unsafe { std::env::set_var(key, " 9 ") };
+        assert_eq!(max_retries(), 9);
+
+        // Zero is honored (disables retries).
+        unsafe { std::env::set_var(key, "0") };
+        assert_eq!(max_retries(), 0);
+
+        // Unparsable values fall back to the default.
+        unsafe { std::env::set_var(key, "not-a-number") };
+        assert_eq!(max_retries(), DEFAULT_MAX_RETRIES);
+
+        // Negative values aren't valid u32 and fall back to the default.
+        unsafe { std::env::set_var(key, "-1") };
+        assert_eq!(max_retries(), DEFAULT_MAX_RETRIES);
+
+        match original {
+            Some(val) => unsafe { std::env::set_var(key, val) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+    }
+
+    #[test]
     fn github_hosts_scope_matches_github_cdns() {
         assert!(GitHubHosts == "github.com");
         assert!(GitHubHosts == "api.github.com");
