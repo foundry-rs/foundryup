@@ -216,6 +216,62 @@ fn use_version_digit_prefixed_name_is_literal() {
     }
 }
 
+// `--use <name>` without `--repo` finds a build installed under a custom repo.
+#[test]
+fn use_version_finds_custom_repo_without_repo_flag() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+    let version_dir = foundry_dir.join("versions/someone/foundry/someone-branch-x");
+    std::fs::create_dir_all(&version_dir).unwrap();
+
+    for bin in BINS {
+        let bin_path = version_dir.join(format!("{bin}{EXE_SUFFIX}"));
+        write_fake_bin(&bin_path);
+    }
+
+    foundryup()
+        .env("FOUNDRY_DIR", &foundry_dir)
+        .args(["--use", "someone-branch-x"])
+        .assert()
+        .success()
+        .stderr_eq(str![[r#"
+...
+[..]use - [..]
+...
+"#]]);
+
+    for &bin in BINS {
+        let name = format!("{bin}{EXE_SUFFIX}");
+        assert!(foundry_dir.join("bin").join(&name).exists(), "{name} was not activated");
+    }
+}
+
+// `--use <name>` errors when the same version name exists under multiple repos.
+#[test]
+fn use_version_ambiguous_across_repos_errors() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+
+    for repo in ["alice/foundry", "bob/foundry"] {
+        let version_dir = foundry_dir.join(format!("versions/{repo}/shared-name"));
+        std::fs::create_dir_all(&version_dir).unwrap();
+        for bin in BINS {
+            write_fake_bin(&version_dir.join(format!("{bin}{EXE_SUFFIX}")));
+        }
+    }
+
+    foundryup()
+        .env("FOUNDRY_DIR", &foundry_dir)
+        .args(["--use", "shared-name"])
+        .assert()
+        .failure()
+        .stderr_eq(str![[r#"
+...
+[..]installed for multiple repos[..]
+...
+"#]]);
+}
+
 // On unix, `--use` activates a version by symlinking it into the bin dir.
 #[cfg(unix)]
 #[test]

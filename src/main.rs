@@ -81,7 +81,7 @@ async fn run(cli: Cli) -> Result<()> {
 
     if let Some(ref version) = cli.use_version {
         let repo = cli.repo.as_deref().unwrap_or(config.network.repo);
-        return install::use_version_resolved(&config, repo, version).await;
+        return install::use_version_resolved(&config, repo, version, cli.repo.is_some()).await;
     }
 
     if cli.network.is_some() {
