@@ -659,19 +659,10 @@ fn is_resolvable_use_version(version: &str) -> bool {
     matches!(version, "latest" | "stable" | "nightly") || is_semver_like(version)
 }
 
-/// Whether `version` starts with a digit and has at least two `.` separators
-/// each followed by a digit (e.g. `1.5.0`, `1.5.0-rc1`, but not `123abc`).
+/// Whether `version` is a strict `major.minor.patch` semver version (e.g.
+/// `1.5.0`, `1.5.0-rc1`, but not `123abc` or `0xfoo-branch-release-1.2.3`).
 fn is_semver_like(version: &str) -> bool {
-    if !version.starts_with(|c: char| c.is_ascii_digit()) {
-        return false;
-    }
-    let bytes = version.as_bytes();
-    let dots_followed_by_digit = bytes
-        .iter()
-        .enumerate()
-        .filter(|&(i, &b)| b == b'.' && bytes.get(i + 1).is_some_and(|n| n.is_ascii_digit()))
-        .count();
-    dots_followed_by_digit >= 2
+    semver::Version::parse(version).is_ok()
 }
 
 pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<()> {
@@ -914,12 +905,14 @@ mod tests {
     fn semver_like_cases() {
         assert!(is_semver_like("1.5.0"));
         assert!(is_semver_like("1.5.0-rc1"));
-        assert!(is_semver_like("1.2.3.4"));
         assert!(is_semver_like("10.20.30"));
-        assert!(is_semver_like("1.a.2.3"));
-        assert!(is_semver_like("1.2.x.3"));
-        assert!(is_semver_like("1..2.3"));
-        assert!(is_semver_like("1.2.3."));
+        assert!(is_semver_like("1.5.0+build.1"));
+        // Not strict major.minor.patch semver -> treated verbatim.
+        assert!(!is_semver_like("1.2.3.4"));
+        assert!(!is_semver_like("1.a.2.3"));
+        assert!(!is_semver_like("1.2.x.3"));
+        assert!(!is_semver_like("1..2.3"));
+        assert!(!is_semver_like("1.2.3."));
         assert!(!is_semver_like("1.5"));
         assert!(!is_semver_like("1..2"));
         assert!(!is_semver_like("1.2."));
@@ -929,6 +922,9 @@ mod tests {
         assert!(!is_semver_like("v1.5.0"));
         assert!(!is_semver_like("nightly"));
         assert!(!is_semver_like("foundry-rs-branch-master"));
+        // Digit-prefixed custom build name with dotted numeric segments must not
+        // be mistaken for semver (regression for OSS-334 review).
+        assert!(!is_semver_like("0xfoo-branch-release-1.2.3"));
     }
 
     #[test]
@@ -940,6 +936,7 @@ mod tests {
         assert!(!is_resolvable_use_version("123abc"));
         assert!(!is_resolvable_use_version("nightly-abc123"));
         assert!(!is_resolvable_use_version("foundry-rs-pr-1"));
+        assert!(!is_resolvable_use_version("0xfoo-branch-release-1.2.3"));
     }
 
     #[test]
