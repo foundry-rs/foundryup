@@ -146,6 +146,27 @@ impl Downloader {
         response.text().await.wrap_err("failed to read response body")
     }
 
+    /// Follows redirects for `url` (via a `HEAD` request, without downloading a
+    /// body) and returns the final effective URL.
+    ///
+    /// Used to resolve the `releases/latest` web redirect to a concrete
+    /// `releases/tag/<tag>` URL without calling the rate-limited GitHub API.
+    /// No token is attached, since `github.com` (unlike `api.github.com`) is not
+    /// subject to the unauthenticated API rate limit.
+    pub(crate) async fn resolve_redirect_url(&self, url: &str) -> Result<String> {
+        let parsed = reqwest::Url::parse(url).wrap_err_with(|| format!("invalid URL {url}"))?;
+        let response = self
+            .client
+            .head(parsed)
+            .send()
+            .await
+            .wrap_err_with(|| format!("failed to HEAD {url}"))?;
+        if !response.status().is_success() {
+            bail!("failed to resolve {url}: HTTP {}", response.status());
+        }
+        Ok(response.url().to_string())
+    }
+
     /// Like [`download_to_string`](Self::download_to_string), but returns
     /// `Ok(None)` when the server responds with HTTP 404 Not Found.
     ///
