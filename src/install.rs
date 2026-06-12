@@ -579,12 +579,37 @@ pub(crate) fn list(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Normalizes `version` and activates the matching installed version directory,
-/// so e.g. `1.5.0` resolves to the `v1.5.0` directory.
+/// Resolves channels and semver versions to a release tag; activates any other
+/// value verbatim, so `--use 123abc` looks up `123abc` rather than `v123abc`.
 pub(crate) async fn use_version_resolved(config: &Config, repo: &str, version: &str) -> Result<()> {
-    let downloader = Downloader::new()?;
-    let (_version, tag) = resolve_version_and_tag(&downloader, repo, version).await?;
+    let tag = if is_resolvable_use_version(version) {
+        let downloader = Downloader::new()?;
+        let (_version, tag) = resolve_version_and_tag(&downloader, repo, version).await?;
+        tag
+    } else {
+        version.to_string()
+    };
     use_version(config, repo, &tag)
+}
+
+/// Whether `version` is a channel or semver version that resolves to a tag.
+fn is_resolvable_use_version(version: &str) -> bool {
+    matches!(version, "latest" | "stable" | "nightly") || is_semver_like(version)
+}
+
+/// Whether `version` starts with a digit and has at least two `.` separators
+/// each followed by a digit (e.g. `1.5.0`, `1.5.0-rc1`, but not `123abc`).
+fn is_semver_like(version: &str) -> bool {
+    if !version.starts_with(|c: char| c.is_ascii_digit()) {
+        return false;
+    }
+    let bytes = version.as_bytes();
+    let dots_followed_by_digit = bytes
+        .iter()
+        .enumerate()
+        .filter(|&(i, &b)| b == b'.' && bytes.get(i + 1).is_some_and(|n| n.is_ascii_digit()))
+        .count();
+    dots_followed_by_digit >= 2
 }
 
 pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<()> {
@@ -821,6 +846,38 @@ mod tests {
         let err = latest_nightly_release_tag(json, "foundry-rs/foundry").unwrap_err();
 
         assert!(err.to_string().contains("could not find a nightly release tag"));
+    }
+
+    #[test]
+    fn semver_like_cases() {
+        assert!(is_semver_like("1.5.0"));
+        assert!(is_semver_like("1.5.0-rc1"));
+        assert!(is_semver_like("1.2.3.4"));
+        assert!(is_semver_like("10.20.30"));
+        assert!(is_semver_like("1.a.2.3"));
+        assert!(is_semver_like("1.2.x.3"));
+        assert!(is_semver_like("1..2.3"));
+        assert!(is_semver_like("1.2.3."));
+        assert!(!is_semver_like("1.5"));
+        assert!(!is_semver_like("1..2"));
+        assert!(!is_semver_like("1.2."));
+        assert!(!is_semver_like(".1.2.3"));
+        assert!(!is_semver_like("123abc"));
+        assert!(!is_semver_like("1.x.0"));
+        assert!(!is_semver_like("v1.5.0"));
+        assert!(!is_semver_like("nightly"));
+        assert!(!is_semver_like("foundry-rs-branch-master"));
+    }
+
+    #[test]
+    fn resolvable_use_version_cases() {
+        for channel in ["latest", "stable", "nightly"] {
+            assert!(is_resolvable_use_version(channel));
+        }
+        assert!(is_resolvable_use_version("1.5.0"));
+        assert!(!is_resolvable_use_version("123abc"));
+        assert!(!is_resolvable_use_version("nightly-abc123"));
+        assert!(!is_resolvable_use_version("foundry-rs-pr-1"));
     }
 
     #[test]

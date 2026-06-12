@@ -185,6 +185,37 @@ fn use_version_normalizes_bare_semver() {
     }
 }
 
+// `--use` activates a digit-prefixed non-semver name verbatim, without the `v`
+// prefix applied to semver versions.
+#[test]
+fn use_version_digit_prefixed_name_is_literal() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+    let version_dir = foundry_dir.join("versions/foundry-rs/foundry/123abc");
+    std::fs::create_dir_all(&version_dir).unwrap();
+
+    for bin in BINS {
+        let bin_path = version_dir.join(format!("{bin}{EXE_SUFFIX}"));
+        write_fake_bin(&bin_path);
+    }
+
+    foundryup()
+        .env("FOUNDRY_DIR", &foundry_dir)
+        .args(["--use", "123abc"])
+        .assert()
+        .success()
+        .stderr_eq(str![[r#"
+...
+[..]use - [..]
+...
+"#]]);
+
+    for &bin in BINS {
+        let name = format!("{bin}{EXE_SUFFIX}");
+        assert!(foundry_dir.join("bin").join(&name).exists(), "{name} was not activated");
+    }
+}
+
 // On unix, `--use` activates a version by symlinking it into the bin dir.
 #[cfg(unix)]
 #[test]
