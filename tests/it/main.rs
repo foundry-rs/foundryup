@@ -185,10 +185,13 @@ fn use_version_normalizes_bare_semver() {
     }
 }
 
-// On unix, `--use` activates a version by symlinking it into the bin dir.
+// `--use` activates a version by copying it into the bin dir as a standalone
+// file, not a symlink into the version dir.
 #[cfg(unix)]
 #[test]
-fn use_version_creates_symlink_on_unix() {
+fn use_version_copies_standalone_file() {
+    use std::os::unix::fs::PermissionsExt;
+
     let temp_dir = tempfile::Builder::new().tempdir().unwrap();
     let foundry_dir = temp_dir.path().join(".foundry");
     let version_dir = foundry_dir.join("versions/foundry-rs/foundry/v1.5.0");
@@ -203,8 +206,46 @@ fn use_version_creates_symlink_on_unix() {
     for &bin in BINS {
         let dest = foundry_dir.join("bin").join(bin);
         let meta = std::fs::symlink_metadata(&dest).unwrap();
-        assert!(meta.file_type().is_symlink(), "{bin} should be a symlink");
-        assert_eq!(std::fs::read_link(&dest).unwrap(), version_dir.join(bin));
+        assert!(meta.file_type().is_file(), "{bin} should be a regular file, not a symlink");
+        assert!(meta.permissions().mode() & 0o111 != 0, "{bin} should be executable");
+        // The version dir keeps its copy (a copy, not a move/rename).
+        assert!(version_dir.join(bin).is_file(), "{bin} should remain in the version dir");
+    }
+}
+
+// A stale symlink left in the bin dir (e.g. from a previous `--path` install)
+// is removed and replaced with a copy, without clobbering the symlink target.
+#[cfg(unix)]
+#[test]
+fn use_version_replaces_stale_symlink_without_clobbering_target() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+    let version_dir = foundry_dir.join("versions/foundry-rs/foundry/v1.5.0");
+    std::fs::create_dir_all(&version_dir).unwrap();
+    let bin_dir = foundry_dir.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+
+    // A pretend local build artifact that a previous `--path` install symlinked to.
+    let local_build = temp_dir.path().join("local-build");
+    std::fs::create_dir_all(&local_build).unwrap();
+
+    for bin in BINS {
+        write_fake_bin(&version_dir.join(bin));
+        let artifact = local_build.join(bin);
+        std::fs::write(&artifact, b"local artifact").unwrap();
+        std::os::unix::fs::symlink(&artifact, bin_dir.join(bin)).unwrap();
+    }
+
+    foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["--use", "1.5.0"]).assert().success();
+
+    for &bin in BINS {
+        let dest = bin_dir.join(bin);
+        assert!(
+            std::fs::symlink_metadata(&dest).unwrap().file_type().is_file(),
+            "{bin} should be a regular file"
+        );
+        // The original local build artifact must be untouched.
+        assert_eq!(std::fs::read(local_build.join(bin)).unwrap(), b"local artifact");
     }
 }
 
