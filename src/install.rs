@@ -579,12 +579,90 @@ pub(crate) fn list(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Normalizes `version` and activates the matching installed version directory,
-/// so e.g. `1.5.0` resolves to the `v1.5.0` directory.
-pub(crate) async fn use_version_resolved(config: &Config, repo: &str, version: &str) -> Result<()> {
-    let downloader = Downloader::new()?;
-    let (_version, tag) = resolve_version_and_tag(&downloader, repo, version).await?;
+/// Resolves channels and semver versions to a release tag; activates any other
+/// value verbatim, so `--use 123abc` looks up `123abc` rather than `v123abc`.
+///
+/// Without an explicit `--repo`, a version not found under the default repo is
+/// looked up across all installed repos, keeping `--use <name>` working for
+/// custom-repo builds under `versions/<owner>/<repo>/`.
+pub(crate) async fn use_version_resolved(
+    config: &Config,
+    repo: &str,
+    version: &str,
+    repo_explicit: bool,
+) -> Result<()> {
+    let tag = if is_resolvable_use_version(version) {
+        let downloader = Downloader::new()?;
+        let (_version, tag) = resolve_version_and_tag(&downloader, repo, version).await?;
+        tag
+    } else {
+        version.to_string()
+    };
+
+    if config.version_dir(repo, &tag).is_dir() {
+        return use_version(config, repo, &tag);
+    }
+
+    if !repo_explicit {
+        if let Some(found_repo) = find_unique_repo_for_version(config, &tag)? {
+            return use_version(config, &found_repo, &tag);
+        }
+    }
+
     use_version(config, repo, &tag)
+}
+
+/// Finds the version directory named `version` across all installed repos,
+/// erroring if more than one repo matches.
+fn find_unique_repo_for_version(config: &Config, version: &str) -> Result<Option<String>> {
+    if !config.versions_dir.exists() {
+        return Ok(None);
+    }
+
+    let mut matches = Vec::new();
+    for owner_entry in fs::read_dir(&config.versions_dir)? {
+        let owner_entry = owner_entry?;
+        let owner_path = owner_entry.path();
+        if !owner_path.is_dir() {
+            continue;
+        }
+        let owner = owner_entry.file_name().to_string_lossy().to_string();
+
+        for repo_entry in fs::read_dir(&owner_path)? {
+            let repo_entry = repo_entry?;
+            if !repo_entry.path().is_dir() {
+                continue;
+            }
+            let repo = repo_entry.file_name().to_string_lossy().to_string();
+
+            if config.version_dir(&format!("{owner}/{repo}"), version).is_dir() {
+                matches.push(format!("{owner}/{repo}"));
+            }
+        }
+    }
+
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(Some(matches.remove(0))),
+        _ => {
+            matches.sort();
+            bail!(
+                "version {version} is installed for multiple repos ({}); specify --repo to disambiguate",
+                matches.join(", ")
+            )
+        }
+    }
+}
+
+/// Whether `version` is a channel or semver version that resolves to a tag.
+fn is_resolvable_use_version(version: &str) -> bool {
+    matches!(version, "latest" | "stable" | "nightly") || is_semver_like(version)
+}
+
+/// Whether `version` is a strict `major.minor.patch` semver version (e.g.
+/// `1.5.0`, `1.5.0-rc1`, but not `123abc` or `0xfoo-branch-release-1.2.3`).
+fn is_semver_like(version: &str) -> bool {
+    semver::Version::parse(version).is_ok()
 }
 
 pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<()> {
