@@ -551,14 +551,17 @@ pub(crate) fn list(config: &Config) -> Result<()> {
 
                     tell!("{owner_name}/{repo_name} {version_name}");
 
+                    // A missing or non-runnable binary is a broken install.
                     for bin in bins {
                         let bin_path = version_path.join(bin_name(bin));
-                        if bin_path.exists() {
-                            match get_bin_version(&bin_path) {
-                                Ok(v) => tell!("- {v}"),
-                                Err(_) => tell!("- {bin} (unknown version)"),
-                            }
-                        }
+                        let v = get_bin_version(&bin_path).wrap_err_with(|| {
+                            format!(
+                                "{owner_name}/{repo_name} {version_name} is broken: \
+                                 failed to run {}",
+                                bin_path.display()
+                            )
+                        })?;
+                        tell!("- {v}");
                     }
                     println!();
                 }

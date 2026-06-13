@@ -52,7 +52,8 @@ pub(crate) struct Cli {
     pub commit: Option<String>,
 
     /// Number of CPUs to use for building (default: all)
-    #[arg(short = 'j', long, env = "FOUNDRYUP_JOBS", hide_env = true)]
+    // Not bound to `FOUNDRYUP_JOBS`; only the flag is honored.
+    #[arg(short = 'j', long)]
     pub jobs: Option<u32>,
 
     /// Cargo profile to use for building
