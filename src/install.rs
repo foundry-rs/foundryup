@@ -47,7 +47,7 @@ async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
     let release_url =
         format!("https://github.com/{}/releases/download/{tag}/", config.network.repo);
 
-    let hashes = if config.network.has_attestation && !args.force {
+    let check = if config.network.has_attestation && !args.force {
         fetch_and_verify_attestation(
             config,
             repo,
@@ -58,11 +58,18 @@ async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
             &target,
         )
         .await?
-    } else if args.force {
-        say!("skipped SHA verification due to --force flag");
-        None
     } else {
-        None
+        if args.force {
+            say!("skipped SHA verification due to --force flag");
+        }
+        PrebuiltCheck::Download(None)
+    };
+
+    // A verified cache hit is already activated; return so `main` can still
+    // print the foundryup self-update check instead of exiting the process here.
+    let hashes = match check {
+        PrebuiltCheck::AlreadyActivated => return Ok(()),
+        PrebuiltCheck::Download(hashes) => hashes,
     };
 
     download_and_extract(config, repo, &downloader, &release_url, &version, &tag, &target).await?;
@@ -283,6 +290,16 @@ async fn generate_manpages_from_source(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Outcome of the pre-download attestation check for a prebuilt install.
+enum PrebuiltCheck {
+    /// The requested version was already installed and verified, and has been
+    /// activated. The caller should finish without downloading anything.
+    AlreadyActivated,
+    /// The binaries must be downloaded. The optional hashes are used to verify
+    /// them afterwards (`None` when the release has no attestation).
+    Download(Option<HashMap<String, String>>),
+}
+
 async fn fetch_and_verify_attestation(
     config: &Config,
     repo: &str,
@@ -291,7 +308,7 @@ async fn fetch_and_verify_attestation(
     version: &str,
     tag: &str,
     target: &Target,
-) -> Result<Option<HashMap<String, String>>> {
+) -> Result<PrebuiltCheck> {
     let bins = config.network.bins;
     say!("checking if {} for {tag} version are already installed", bins.join(", "));
 
@@ -309,13 +326,13 @@ async fn fetch_and_verify_attestation(
             let link = content.lines().next().unwrap_or("").trim().to_string();
             if link.is_empty() || link.contains("Not Found") {
                 say!("no attestation found for this release, skipping SHA verification");
-                return Ok(None);
+                return Ok(PrebuiltCheck::Download(None));
             }
             link
         }
         None => {
             say!("no attestation found for this release, skipping SHA verification");
-            return Ok(None);
+            return Ok(PrebuiltCheck::Download(None));
         }
     };
 
@@ -354,12 +371,12 @@ async fn fetch_and_verify_attestation(
             say!("version {tag} already installed and verified, activating...");
             use_version(config, repo, tag)?;
             say!("done!");
-            std::process::exit(0);
+            return Ok(PrebuiltCheck::AlreadyActivated);
         }
     }
 
     say!("binaries not found or do not match expected hashes, downloading new binaries");
-    Ok(Some(hashes))
+    Ok(PrebuiltCheck::Download(Some(hashes)))
 }
 
 fn parse_attestation_payload(json: &str) -> Result<HashMap<String, String>> {
