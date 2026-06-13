@@ -10,6 +10,7 @@ use snapbox as _;
 
 use clap::Parser;
 use eyre::Result;
+use std::sync::Arc;
 
 mod cli;
 mod config;
@@ -65,7 +66,7 @@ async fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
-    let config = Config::new()?;
+    let config = Arc::new(Config::new()?);
 
     if cli.update {
         return self_update::run(&config).await;
@@ -91,14 +92,26 @@ async fn run(cli: Cli) -> Result<()> {
 
     print_banner();
 
-    // Check and report the foundryup update status before any fallible install
-    // step, so the warning is shown even when an install later fails.
-    print_update(self_update::check_for_update(&config).await);
+    // Run the update check in the background so it doesn't block the install.
+    let update_handle = tokio::spawn({
+        let config = config.clone();
+        async move { self_update::check_for_update(&config).await }
+    });
 
-    process::check_bins_in_use(&config)?;
-    install::run(&config, &cli).await?;
+    let install_result = async {
+        process::check_bins_in_use(&config)?;
+        install::run(&config, &cli).await
+    }
+    .await;
 
-    Ok(())
+    // Report the update status regardless of whether the install succeeded; a
+    // failure of the background check itself must not mask an install error.
+    match update_handle.await {
+        Ok(update) => print_update(update),
+        Err(e) => warn!("Could not check for updates: {e}"),
+    }
+
+    install_result
 }
 
 fn print_banner() {
