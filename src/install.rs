@@ -608,11 +608,9 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
 
         let old_version = if dest.exists() { get_bin_version(&dest).ok() } else { None };
 
+        // Copy so the activated binary is a standalone file; remove first to
+        // avoid following a stale `--path` symlink.
         remove_if_exists(&dest)?;
-
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&src, &dest)?;
-        #[cfg(not(unix))]
         fs::copy(&src, &dest)?;
 
         let v = get_bin_version(&dest)
