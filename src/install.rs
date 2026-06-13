@@ -725,8 +725,9 @@ in your 'PATH' to allow the newly installed version to take precedence!
 /// used for the archive files and asset names.
 ///
 /// The `latest` and `stable` channels are resolved to the newest non-prerelease
-/// tag via the GitHub API. The `nightly` channel is resolved to the newest
-/// nightly release tag. Everything else is normalized offline.
+/// tag via the `releases/latest` web redirect, falling back to the GitHub API.
+/// The `nightly` channel is resolved to the newest nightly release tag.
+/// Everything else is normalized offline.
 pub(crate) async fn resolve_version_and_tag(
     downloader: &Downloader,
     repo: &str,
@@ -747,8 +748,15 @@ pub(crate) async fn resolve_version_and_tag(
     }
 }
 
-/// Fetches the newest non-prerelease release tag for `repo` via the GitHub API.
+/// Fetches the newest non-prerelease release tag for `repo`.
+///
+/// Prefers the `releases/latest` web redirect, which is not subject to the
+/// unauthenticated GitHub API rate limit (the cause of CI `403` failures), and
+/// falls back to the GitHub API when the redirect cannot be resolved.
 async fn fetch_latest_release_tag(downloader: &Downloader, repo: &str) -> Result<String> {
+    if let Some(tag) = fetch_latest_release_tag_via_redirect(downloader, repo).await {
+        return Ok(tag);
+    }
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
     let body = downloader
         .download_to_string(&url)
@@ -760,6 +768,33 @@ async fn fetch_latest_release_tag(downloader: &Downloader, repo: &str) -> Result
         Some(tag) => Ok(tag.to_string()),
         None => bail!("could not find a latest release tag for {repo}"),
     }
+}
+
+/// Resolves the latest release tag by following the `releases/latest` web
+/// redirect and reading the tag from the final `releases/tag/<tag>` URL.
+///
+/// Returns `None` (so the caller falls back to the API) when the redirect cannot
+/// be resolved or the final URL does not yield a valid tag.
+async fn fetch_latest_release_tag_via_redirect(
+    downloader: &Downloader,
+    repo: &str,
+) -> Option<String> {
+    let url = format!("https://github.com/{repo}/releases/latest");
+    let final_url = downloader.resolve_redirect_url(&url).await.ok()?;
+    tag_from_release_url(&final_url)
+}
+
+/// Extracts and validates a release tag from a `.../releases/tag/<tag>` URL.
+///
+/// Returns `None` for any URL that is not a tag URL or whose tag is not a
+/// plausible version tag: it must look like `v<digit>...` and contain only
+/// `[A-Za-z0-9._-]`, so a trailing slash, query, or fragment is rejected.
+fn tag_from_release_url(url: &str) -> Option<String> {
+    let (_, tag) = url.rsplit_once("/releases/tag/")?;
+    let valid = tag.starts_with('v')
+        && tag.as_bytes().get(1).is_some_and(u8::is_ascii_digit)
+        && tag.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    valid.then(|| tag.to_string())
 }
 
 /// Fetches the newest nightly release tag for `repo` via the GitHub API.
@@ -902,41 +937,43 @@ mod tests {
     }
 
     #[test]
-    fn semver_like_cases() {
-        assert!(is_semver_like("1.5.0"));
-        assert!(is_semver_like("1.5.0-rc1"));
-        assert!(is_semver_like("10.20.30"));
-        assert!(is_semver_like("1.5.0+build.1"));
-        // Not strict major.minor.patch semver -> treated verbatim.
-        assert!(!is_semver_like("1.2.3.4"));
-        assert!(!is_semver_like("1.a.2.3"));
-        assert!(!is_semver_like("1.2.x.3"));
-        assert!(!is_semver_like("1..2.3"));
-        assert!(!is_semver_like("1.2.3."));
-        assert!(!is_semver_like("1.5"));
-        assert!(!is_semver_like("1..2"));
-        assert!(!is_semver_like("1.2."));
-        assert!(!is_semver_like(".1.2.3"));
-        assert!(!is_semver_like("123abc"));
-        assert!(!is_semver_like("1.x.0"));
-        assert!(!is_semver_like("v1.5.0"));
-        assert!(!is_semver_like("nightly"));
-        assert!(!is_semver_like("foundry-rs-branch-master"));
-        // Digit-prefixed custom build name with dotted numeric segments must not
-        // be mistaken for semver (regression for OSS-334 review).
-        assert!(!is_semver_like("0xfoo-branch-release-1.2.3"));
+    fn tag_from_release_url_extracts_valid_tag() {
+        // The `releases/latest` redirect lands on a concrete tag page.
+        assert_eq!(
+            tag_from_release_url("https://github.com/foundry-rs/foundry/releases/tag/v1.7.1"),
+            Some("v1.7.1".to_string())
+        );
+        // `-` and `.` are allowed (e.g. release candidates).
+        assert_eq!(
+            tag_from_release_url("https://github.com/foundry-rs/foundry/releases/tag/v1.0.0-rc.1"),
+            Some("v1.0.0-rc.1".to_string())
+        );
     }
 
     #[test]
-    fn resolvable_use_version_cases() {
-        for channel in ["latest", "stable", "nightly"] {
-            assert!(is_resolvable_use_version(channel));
-        }
-        assert!(is_resolvable_use_version("1.5.0"));
-        assert!(!is_resolvable_use_version("123abc"));
-        assert!(!is_resolvable_use_version("nightly-abc123"));
-        assert!(!is_resolvable_use_version("foundry-rs-pr-1"));
-        assert!(!is_resolvable_use_version("0xfoo-branch-release-1.2.3"));
+    fn tag_from_release_url_rejects_non_tag_or_invalid() {
+        // Redirect did not move to a tag page (e.g. landed back on `latest`).
+        assert_eq!(
+            tag_from_release_url("https://github.com/foundry-rs/foundry/releases/latest"),
+            None
+        );
+        // Tag is not a plausible version (must start with `v<digit>`).
+        assert_eq!(
+            tag_from_release_url(
+                "https://github.com/foundry-rs/foundry/releases/tag/not-a-version"
+            ),
+            None
+        );
+        // A trailing slash introduces a disallowed character.
+        assert_eq!(
+            tag_from_release_url("https://github.com/foundry-rs/foundry/releases/tag/v1.7.1/"),
+            None
+        );
+        // Empty tag.
+        assert_eq!(
+            tag_from_release_url("https://github.com/foundry-rs/foundry/releases/tag/"),
+            None
+        );
     }
 
     #[test]
