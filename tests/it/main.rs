@@ -322,6 +322,26 @@ fn list_empty() {
         .success();
 }
 
+// `--list` results are written to stdout.
+#[test]
+fn list_writes_to_stdout() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+    let version_dir = foundry_dir.join("versions/foundry-rs/foundry/v1.0.0");
+    std::fs::create_dir_all(&version_dir).unwrap();
+
+    for bin in BINS {
+        std::fs::write(version_dir.join(format!("{bin}{EXE_SUFFIX}")), "fake binary").unwrap();
+    }
+
+    foundryup().env("FOUNDRY_DIR", &foundry_dir).arg("--list").assert().success().stdout_eq(str![
+        [r#"
+foundryup: foundry-rs/foundry v1.0.0
+...
+"#]
+    ]);
+}
+
 #[test]
 fn migrate_legacy_versions() {
     let temp_dir = tempfile::Builder::new().tempdir().unwrap();

@@ -157,6 +157,14 @@ macro_rules! say {
     };
 }
 
+/// Like [`say`], but writes to stdout instead of stderr.
+#[macro_export]
+macro_rules! tell {
+    ($($arg:tt)*) => {
+        println!("foundryup: {}", format_args!($($arg)*))
+    };
+}
+
 #[macro_export]
 macro_rules! warn {
     ($($arg:tt)*) => {
