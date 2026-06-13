@@ -295,15 +295,14 @@ fn use_version_creates_symlink_on_unix() {
     }
 }
 
-// Empty `FOUNDRYUP_*` env vars are treated as unset, so an empty `FOUNDRYUP_JOBS`
-// must not fail clap's `u32` parsing.
+// Empty `FOUNDRYUP_*` env vars are treated as unset, so an empty numeric var
+// like `FOUNDRYUP_PR` must not fail clap's integer parsing.
 #[test]
 fn empty_foundryup_env_is_ignored() {
     let temp_dir = tempfile::Builder::new().tempdir().unwrap();
 
     foundryup()
         .env("FOUNDRY_DIR", temp_dir.path().join(".foundry"))
-        .env("FOUNDRYUP_JOBS", "")
         .env("FOUNDRYUP_VERSION", "")
         .env("FOUNDRYUP_PR", "")
         .arg("--list")
@@ -331,12 +330,34 @@ fn list_writes_to_stdout() {
     std::fs::create_dir_all(&version_dir).unwrap();
 
     for bin in BINS {
-        std::fs::write(version_dir.join(format!("{bin}{EXE_SUFFIX}")), "fake binary").unwrap();
+        write_fake_bin(&version_dir.join(format!("{bin}{EXE_SUFFIX}")));
     }
 
     foundryup().env("FOUNDRY_DIR", &foundry_dir).arg("--list").assert().success().stdout_eq(str![
         [r#"
 foundryup: foundry-rs/foundry v1.0.0
+...
+"#]
+    ]);
+}
+
+// A version directory missing a binary fails the listing.
+#[test]
+fn list_fails_on_broken_install() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+    let version_dir = foundry_dir.join("versions/foundry-rs/foundry/v1.0.0");
+    std::fs::create_dir_all(&version_dir).unwrap();
+
+    // Install all but the last binary, leaving the version incomplete.
+    for bin in &BINS[..BINS.len() - 1] {
+        write_fake_bin(&version_dir.join(format!("{bin}{EXE_SUFFIX}")));
+    }
+
+    foundryup().env("FOUNDRY_DIR", &foundry_dir).arg("--list").assert().failure().stderr_eq(str![
+        [r#"
+...
+[..]is broken: failed to run [..]
 ...
 "#]
     ]);
@@ -354,7 +375,7 @@ fn migrate_legacy_versions() {
     for version in ["nightly", "stable"] {
         for bin in BINS {
             let bin_path = versions_dir.join(version).join(format!("{bin}{EXE_SUFFIX}"));
-            std::fs::write(&bin_path, "fake binary").unwrap();
+            write_fake_bin(&bin_path);
         }
     }
 

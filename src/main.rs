@@ -26,8 +26,8 @@ use config::Config;
 /// Removes empty `FOUNDRYUP_*` variables before clap parses them.
 ///
 /// clap's `env` support captures `Some("")` and parses it as a real value (e.g.
-/// an empty version, or a non-numeric `FOUNDRYUP_JOBS` that fails parsing), so an
-/// empty variable is cleared here and treated as unset.
+/// an empty `FOUNDRYUP_VERSION` treated as a real version), so an empty variable
+/// is cleared here and treated as unset.
 fn clear_empty_foundryup_env() {
     // `vars_os` is a snapshot, so removing during iteration is safe.
     for (key, value) in std::env::vars_os() {
