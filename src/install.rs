@@ -809,7 +809,7 @@ async fn fetch_latest_release_tag_via_redirect(
 /// Returns `None` for any URL that is not a tag URL or whose tag is not a
 /// plausible version tag: it must look like `v<digit>...` and contain only
 /// `[A-Za-z0-9._-]`, so a trailing slash, query, or fragment is rejected.
-fn tag_from_release_url(url: &str) -> Option<String> {
+pub(crate) fn tag_from_release_url(url: &str) -> Option<String> {
     let (_, tag) = url.rsplit_once("/releases/tag/")?;
     let valid = tag.starts_with('v')
         && tag.as_bytes().get(1).is_some_and(u8::is_ascii_digit)
