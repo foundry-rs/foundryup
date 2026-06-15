@@ -62,6 +62,33 @@ pub(crate) async fn run(config: &Config) -> Result<()> {
 pub(crate) async fn check_for_update(_config: &Config) -> Result<Option<String>> {
     let downloader = Downloader::new()?;
 
+    let remote_version = fetch_latest_foundryup_version(&downloader).await?;
+
+    debug!("current version: {VERSION}, remote version: {remote_version}");
+
+    let current = Version::parse(VERSION).wrap_err("failed to parse current version")?;
+    let remote = match Version::parse(&remote_version) {
+        Ok(v) => v,
+        Err(e) => {
+            debug!("failed to parse remote version '{remote_version}': {e}");
+            return Ok(None);
+        }
+    };
+
+    if remote > current { Ok(Some(remote_version)) } else { Ok(None) }
+}
+
+/// Resolves the latest published foundryup version (without a leading `v`).
+///
+/// Prefers the `releases/latest` web redirect, which is not subject to the
+/// unauthenticated GitHub API rate limit, mirroring the Foundry release
+/// resolver in `install.rs`. Falls back to the GitHub API when the redirect
+/// cannot be resolved.
+async fn fetch_latest_foundryup_version(downloader: &Downloader) -> Result<String> {
+    if let Some(version) = fetch_latest_foundryup_version_via_redirect(downloader).await {
+        return Ok(version);
+    }
+
     let releases_url = format!("https://api.github.com/repos/{FOUNDRYUP_REPO}/releases/latest");
 
     debug!("fetching latest release from {releases_url}");
@@ -78,18 +105,17 @@ pub(crate) async fn check_for_update(_config: &Config) -> Result<Option<String>>
         .as_str()
         .ok_or_else(|| eyre::eyre!("missing tag_name in release response"))?;
 
-    let remote_version = tag_name.trim_start_matches('v');
+    Ok(tag_name.trim_start_matches('v').to_string())
+}
 
-    debug!("current version: {VERSION}, remote version: {remote_version}");
-
-    let current = Version::parse(VERSION).wrap_err("failed to parse current version")?;
-    let remote = match Version::parse(remote_version) {
-        Ok(v) => v,
-        Err(e) => {
-            debug!("failed to parse remote version '{remote_version}': {e}");
-            return Ok(None);
-        }
-    };
-
-    if remote > current { Ok(Some(remote_version.to_string())) } else { Ok(None) }
+/// Resolves the latest foundryup version by following the `releases/latest`
+/// redirect and reading the tag from the final `releases/tag/<tag>` URL.
+///
+/// Returns `None` (so the caller falls back to the API) when the redirect cannot
+/// be resolved or the final URL does not yield a valid tag.
+async fn fetch_latest_foundryup_version_via_redirect(downloader: &Downloader) -> Option<String> {
+    let url = format!("https://github.com/{FOUNDRYUP_REPO}/releases/latest");
+    let final_url = downloader.resolve_redirect_url(&url).await.ok()?;
+    let tag = crate::install::tag_from_release_url(&final_url)?;
+    Some(tag.trim_start_matches('v').to_string())
 }
