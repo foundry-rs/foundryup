@@ -599,7 +599,7 @@ pub(crate) fn list(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Resolves channels and semver versions to a release tag; activates any other
+/// Resolves channels and version numbers to a release tag; activates any other
 /// value verbatim, so `--use 123abc` looks up `123abc` rather than `v123abc`.
 ///
 /// Without an explicit `--repo`, a version not found under the default repo is
@@ -674,15 +674,22 @@ fn find_unique_repo_for_version(config: &Config, version: &str) -> Result<Option
     }
 }
 
-/// Whether `version` is a channel or semver version that resolves to a tag.
+/// Whether `version` is a channel or a version that resolves to a tag.
 fn is_resolvable_use_version(version: &str) -> bool {
-    matches!(version, "latest" | "stable" | "nightly") || is_semver_like(version)
+    matches!(version, "latest" | "stable" | "nightly") || looks_like_version_number(version)
 }
 
-/// Whether `version` is a strict `major.minor.patch` semver version (e.g.
-/// `1.5.0`, `1.5.0-rc1`, but not `123abc` or `0xfoo-branch-release-1.2.3`).
-fn is_semver_like(version: &str) -> bool {
-    semver::Version::parse(version).is_ok()
+/// Whether `version` looks like a dotted version number: it starts with a digit
+/// and has at least two `.<digit>` groups (e.g. `1.5.0`, `1.5.0-rc1`, but not
+/// `1.5`, `v1.5.0`, or `123abc`).
+fn looks_like_version_number(version: &str) -> bool {
+    let bytes = version.as_bytes();
+    if !bytes.first().is_some_and(u8::is_ascii_digit) {
+        return false;
+    }
+    let dot_digit_groups =
+        bytes.windows(2).filter(|w| w[0] == b'.' && w[1].is_ascii_digit()).count();
+    dot_digit_groups >= 2
 }
 
 pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<()> {
@@ -994,6 +1001,37 @@ mod tests {
             tag_from_release_url("https://github.com/foundry-rs/foundry/releases/tag/"),
             None
         );
+    }
+
+    #[test]
+    fn looks_like_version_number_cases() {
+        assert!(looks_like_version_number("1.5.0"));
+        assert!(looks_like_version_number("1.5.0-rc1"));
+        assert!(looks_like_version_number("10.20.30"));
+        // Non-semver tags with two `.<digit>` groups still match.
+        assert!(looks_like_version_number("1.2.3foo"));
+        // Extra dots/segments are absorbed as long as two `.<digit>` groups exist.
+        assert!(looks_like_version_number("1..2.3"));
+        assert!(looks_like_version_number("1.a.2.3"));
+        // Fewer than two dot-digit groups, or not starting with a digit.
+        assert!(!looks_like_version_number("1.5"));
+        assert!(!looks_like_version_number("1..2"));
+        assert!(!looks_like_version_number("1.a.2"));
+        assert!(!looks_like_version_number("v1.5.0"));
+        assert!(!looks_like_version_number("123abc"));
+        assert!(!looks_like_version_number("nightly"));
+        assert!(!looks_like_version_number(""));
+    }
+
+    #[test]
+    fn is_resolvable_use_version_cases() {
+        assert!(is_resolvable_use_version("latest"));
+        assert!(is_resolvable_use_version("stable"));
+        assert!(is_resolvable_use_version("nightly"));
+        assert!(is_resolvable_use_version("1.5.0"));
+        assert!(!is_resolvable_use_version("v1.5.0"));
+        assert!(!is_resolvable_use_version("foundry-rs-branch-master"));
+        assert!(!is_resolvable_use_version("nightly-abc123"));
     }
 
     #[test]
