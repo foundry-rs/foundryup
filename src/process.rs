@@ -1,24 +1,37 @@
 use crate::config::Config;
 use eyre::{Result, bail};
 use std::ffi::OsStr;
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{Process, ProcessRefreshKind, ProcessesToUpdate, System, Uid, UpdateKind};
 
 pub(crate) fn check_bins_in_use(config: &Config) -> Result<()> {
     let mut sys = System::new();
-    // Refresh process names only, excluding per-process threads/tasks.
+    // Refresh only the process data needed for the in-use check, excluding per-process
+    // threads/tasks.
     sys.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
-        ProcessRefreshKind::nothing().without_tasks(),
+        ProcessRefreshKind::nothing().with_user(UpdateKind::Always).without_tasks(),
     );
 
-    let names = sys.processes().values().map(sysinfo::Process::name);
+    let current_user_id = current_effective_user_id(&sys);
+    let names = sys
+        .processes()
+        .values()
+        .filter(|process| {
+            current_user_id.as_ref().is_none_or(|uid| process.effective_user_id() == Some(uid))
+        })
+        .map(Process::name);
 
     if let Some(bin) = detect_in_use(config.network.bins, names) {
         bail!("'{bin}' is currently running. Please stop the process and try again.");
     }
 
     Ok(())
+}
+
+fn current_effective_user_id(sys: &System) -> Option<Uid> {
+    let pid = sysinfo::get_current_pid().ok()?;
+    sys.process(pid)?.effective_user_id().cloned()
 }
 
 /// Returns the first binary in `bins` whose name exactly matches a running process.
