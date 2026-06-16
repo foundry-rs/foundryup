@@ -139,6 +139,41 @@ For more information, try '--help'.
 "#]]);
 }
 
+// An empty `--use` value is rejected, not defaulted (matching the shell installer).
+#[test]
+fn use_empty_version_errors() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+
+    foundryup()
+        .env("FOUNDRY_DIR", temp_dir.path().join(".foundry"))
+        .args(["--use", ""])
+        .assert()
+        .failure()
+        .stderr_eq(str![[r#"
+...
+[..]no version provided[..]
+...
+"#]]);
+}
+
+// An empty option value (here `--repo ""`) is treated as unset and falls back to
+// its default, so activation looks under the default `foundry-rs/foundry` repo.
+#[test]
+fn empty_repo_falls_back_to_default() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+
+    foundryup()
+        .env("FOUNDRY_DIR", temp_dir.path().join(".foundry"))
+        .args(["--repo", "", "--use", "nonexistent-version"])
+        .assert()
+        .failure()
+        .stderr_eq(str![[r#"
+...
+[..]version nonexistent-version not installed for foundry-rs/foundry[..]
+...
+"#]]);
+}
+
 #[test]
 fn use_nonexistent_version() {
     let temp_dir = tempfile::Builder::new().tempdir().unwrap();

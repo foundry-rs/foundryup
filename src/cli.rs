@@ -89,6 +89,31 @@ pub(crate) struct Cli {
     pub version_flag: Option<bool>,
 }
 
+impl Cli {
+    /// Treats an explicit empty option value (e.g. `--repo ""` or `-i ""`) as
+    /// unset so it falls back to its default, matching the shell installer where
+    /// empty variables are defaulted via `${VAR:-default}` / `-n` / `-z` checks.
+    ///
+    /// `--use` is intentionally excluded: an empty value there is an error ("no
+    /// version provided"), not a default. `--path` needs no handling because clap
+    /// already rejects an empty path value.
+    pub(crate) fn clear_empty_values(&mut self) {
+        for opt in [
+            &mut self.repo,
+            &mut self.branch,
+            &mut self.version,
+            &mut self.commit,
+            &mut self.arch,
+            &mut self.platform,
+            &mut self.network,
+        ] {
+            if opt.as_deref() == Some("") {
+                *opt = None;
+            }
+        }
+    }
+}
+
 pub(crate) fn print_completions(shell: clap_complete::Shell) {
     clap_complete::generate(shell, &mut Cli::command(), "foundryup", &mut std::io::stdout());
 }

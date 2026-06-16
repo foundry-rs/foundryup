@@ -52,7 +52,8 @@ fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    cli.clear_empty_values();
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
 
@@ -80,6 +81,11 @@ async fn run(cli: Cli) -> Result<()> {
     }
 
     if let Some(ref version) = cli.use_version {
+        // An empty `--use` value is an error, not a default (matching the shell
+        // installer); `Cli::clear_empty_values` deliberately leaves it untouched.
+        if version.is_empty() {
+            eyre::bail!("no version provided");
+        }
         let repo = cli.repo.as_deref().unwrap_or(config.network.repo);
         return install::use_version_resolved(&config, repo, version, cli.repo.is_some()).await;
     }
