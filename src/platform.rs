@@ -10,8 +10,10 @@ pub(crate) enum Platform {
 
 impl Platform {
     pub(crate) fn detect() -> Result<Self> {
+        // Linux defaults to the glibc `linux` artifact; the `alpine` (musl)
+        // build is opt-in via `--platform`.
         if cfg!(target_os = "linux") {
-            if is_musl() { Ok(Self::Alpine) } else { Ok(Self::Linux) }
+            Ok(Self::Linux)
         } else if cfg!(target_os = "macos") {
             Ok(Self::Darwin)
         } else if cfg!(target_os = "windows") {
@@ -105,17 +107,6 @@ impl Target {
     }
 }
 
-fn is_musl() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        std::fs::read_to_string("/etc/os-release")
-            .map(|s| s.to_lowercase().contains("alpine"))
-            .unwrap_or(false)
-    }
-    #[cfg(not(target_os = "linux"))]
-    false
-}
-
 fn is_rosetta() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -159,5 +150,22 @@ mod tests {
         if !super::is_rosetta() {
             assert_eq!(Arch::from_str("x86_64"), Arch::Amd64);
         }
+    }
+
+    // Default platform on Linux is `linux`, even for musl/Alpine targets.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_default_platform_is_linux() {
+        let target = Target::detect(None, Some("x86_64")).unwrap();
+        assert_eq!(target.platform, Platform::Linux);
+        assert_eq!(target.platform.as_str(), "linux");
+    }
+
+    // The Alpine/musl artifact is opt-in via `--platform alpine` / FOUNDRYUP_PLATFORM.
+    #[test]
+    fn alpine_override_still_selects_alpine() {
+        let target = Target::detect(Some("alpine"), Some("x86_64")).unwrap();
+        assert_eq!(target.platform, Platform::Alpine);
+        assert_eq!(target.platform.as_str(), "alpine");
     }
 }

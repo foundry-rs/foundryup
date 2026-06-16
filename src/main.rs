@@ -8,7 +8,7 @@
 #[cfg(test)]
 use snapbox as _;
 
-use clap::Parser;
+use clap::{ArgMatches, CommandFactory, FromArgMatches};
 use eyre::Result;
 use std::sync::Arc;
 
@@ -52,14 +52,41 @@ fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(e) => e.exit(),
+    };
+    let action = first_action(&matches);
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
 
-    rt.block_on(run(cli))
+    rt.block_on(run(cli, action))
 }
 
-async fn run(cli: Cli) -> Result<()> {
+/// The mutually exclusive actions that run instead of an install.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    Update,
+    List,
+    Use,
+}
+
+/// Returns whichever of `--update`/`--list`/`--use` appears earliest on the
+/// command line, so the first one given wins when several are passed together.
+fn first_action(matches: &ArgMatches) -> Option<Action> {
+    // `index_of` reports a position even for absent boolean flags (they default
+    // to `false`), so only consider flags actually passed on the command line.
+    let on_cli = |id| matches.value_source(id) == Some(clap::parser::ValueSource::CommandLine);
+    [("update", Action::Update), ("list", Action::List), ("use_version", Action::Use)]
+        .into_iter()
+        .filter(|(id, _)| on_cli(id))
+        .filter_map(|(id, action)| matches.index_of(id).map(|i| (i, action)))
+        .min_by_key(|(i, _)| *i)
+        .map(|(_, action)| action)
+}
+
+async fn run(cli: Cli, action: Option<Action>) -> Result<()> {
     // Handle --completions first (no banner, no config needed)
     if let Some(shell) = cli.completions {
         cli::print_completions(shell);
@@ -68,20 +95,24 @@ async fn run(cli: Cli) -> Result<()> {
 
     let config = Arc::new(Config::new()?);
 
-    if cli.update {
+    if action == Some(Action::Update) {
         return self_update::run(&config).await;
     }
 
     config.migrate_legacy_versions()?;
 
     // `--list`/`--use` run offline: no update check or banner.
-    if cli.list {
-        return install::list(&config);
-    }
-
-    if let Some(ref version) = cli.use_version {
-        let repo = cli.repo.as_deref().unwrap_or(config.network.repo);
-        return install::use_version_resolved(&config, repo, version, cli.repo.is_some()).await;
+    match action {
+        Some(Action::List) => return install::list(&config),
+        Some(Action::Use) => {
+            // `--use` always carries a version value, so this is set when the
+            // use action is selected.
+            let version = cli.use_version.as_deref().unwrap_or_default();
+            let repo = cli.repo.as_deref().unwrap_or(config.network.repo);
+            return install::use_version_resolved(&config, repo, version, cli.repo.is_some()).await;
+        }
+        // `Update` is handled above; `None` falls through to install.
+        Some(Action::Update) | None => {}
     }
 
     if cli.network.is_some() {
@@ -179,4 +210,31 @@ macro_rules! warn {
     ($($arg:tt)*) => {
         eprintln!("foundryup: warning: {}", format_args!($($arg)*))
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn first(args: &[&str]) -> Option<Action> {
+        let matches = Cli::command().get_matches_from(args);
+        first_action(&matches)
+    }
+
+    #[test]
+    fn first_action_is_earliest_on_command_line() {
+        // The earliest of --update/--list/--use wins, regardless of arg order.
+        assert_eq!(first(&["foundryup", "--list", "--update"]), Some(Action::List));
+        assert_eq!(first(&["foundryup", "--update", "--list"]), Some(Action::Update));
+        assert_eq!(first(&["foundryup", "--use", "v1", "--list"]), Some(Action::Use));
+        assert_eq!(first(&["foundryup", "--list", "--use", "v1"]), Some(Action::List));
+        assert_eq!(first(&["foundryup", "--update", "--use", "v1"]), Some(Action::Update));
+        assert_eq!(first(&["foundryup", "--use", "v1", "--update"]), Some(Action::Use));
+        // The `--use=v1` form indexes its value the same as `--use v1`.
+        assert_eq!(first(&["foundryup", "--use=v1", "--list"]), Some(Action::Use));
+        assert_eq!(first(&["foundryup", "--list", "--use=v1"]), Some(Action::List));
+        // No action flag falls through to a normal install.
+        assert_eq!(first(&["foundryup", "-i", "1.2.3"]), None);
+        assert_eq!(first(&["foundryup"]), None);
+    }
 }

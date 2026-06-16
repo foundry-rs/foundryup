@@ -1,7 +1,7 @@
 use crate::{
     config::{Config, FOUNDRYUP_REPO, VERSION},
     download::Downloader,
-    platform::Target,
+    platform::{Arch, Platform},
     say,
 };
 use eyre::{Result, WrapErr};
@@ -27,12 +27,17 @@ pub(crate) async fn run(config: &Config) -> Result<()> {
     say!("downloading foundryup v{new_version}...");
 
     let downloader = Downloader::new()?;
-    let target = Target::detect(None, None)?;
-    let archive_name = format!(
-        "foundryup_{platform}_{arch}",
-        platform = target.platform.as_str(),
-        arch = target.arch.as_str()
-    );
+    // The replacement binary must match this binary's own libc, so a musl build
+    // updates from the `alpine` artifact. This differs from the install target,
+    // which mirrors the legacy installer and defaults Linux to the glibc build.
+    let platform = if cfg!(all(target_os = "linux", target_env = "musl")) {
+        Platform::Alpine
+    } else {
+        Platform::detect()?
+    };
+    let arch = Arch::detect();
+    let archive_name =
+        format!("foundryup_{platform}_{arch}", platform = platform.as_str(), arch = arch.as_str());
 
     let download_url = format!(
         "https://github.com/{FOUNDRYUP_REPO}/releases/download/v{new_version}/{archive_name}"
