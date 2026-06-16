@@ -36,7 +36,7 @@ pub(crate) struct Cli {
     pub list: bool,
 
     /// Use a specific installed version
-    #[arg(short = 'u', long = "use", value_name = "VERSION")]
+    #[arg(short = 'u', long = "use", value_name = "VERSION", value_parser = parse_use_version)]
     pub use_version: Option<String>,
 
     /// Build and install a local repository
@@ -87,6 +87,38 @@ pub(crate) struct Cli {
     /// Print version
     #[arg(short = 'V', short_alias = 'v', long = "version", action = clap::ArgAction::Version)]
     pub version_flag: Option<bool>,
+}
+
+impl Cli {
+    /// Treats an explicit empty option value (e.g. `--repo ""` or `-i ""`) as
+    /// unset so it falls back to its default, matching the shell installer where
+    /// empty variables are defaulted via `${VAR:-default}` / `-n` / `-z` checks.
+    ///
+    /// `--use` is intentionally excluded: an empty value there is an error ("no
+    /// version provided"), not a default, and is rejected at parse time by
+    /// [`parse_use_version`]. `--path` needs no handling because clap already
+    /// rejects an empty path value.
+    pub(crate) fn clear_empty_values(&mut self) {
+        for opt in [
+            &mut self.repo,
+            &mut self.branch,
+            &mut self.version,
+            &mut self.commit,
+            &mut self.arch,
+            &mut self.platform,
+            &mut self.network,
+        ] {
+            if opt.as_deref() == Some("") {
+                *opt = None;
+            }
+        }
+    }
+}
+
+/// Rejects an empty `--use` value at parse time, preserving the legacy shell
+/// installer's "no version provided" error message.
+fn parse_use_version(s: &str) -> Result<String, String> {
+    if s.is_empty() { Err("no version provided".to_string()) } else { Ok(s.to_string()) }
 }
 
 pub(crate) fn print_completions(shell: clap_complete::Shell) {
