@@ -771,7 +771,7 @@ pub(crate) async fn resolve_version_and_tag(
         say!("resolved nightly release tag: {tag}");
         Ok(("nightly".to_string(), tag))
     } else {
-        Ok(normalize_version(version))
+        normalize_version(version)
     }
 }
 
@@ -851,17 +851,27 @@ fn latest_nightly_release_tag(json: &str, repo: &str) -> Result<String> {
         .ok_or_else(|| eyre::eyre!("could not find a nightly release tag for {repo}"))
 }
 
-fn normalize_version(version: &str) -> (String, String) {
+fn normalize_version(version: &str) -> Result<(String, String)> {
+    if is_full_commit_hash(version) {
+        bail!(
+            "`--install <VERSION>` installs prebuilt release artifacts, but `{version}` looks like a commit hash; use `--commit {version}` to build from source"
+        );
+    }
+
     // Only concrete `nightly-<sha>` tags map to the nightly channel here; the
     // bare `nightly` channel is resolved earlier.
     if version.starts_with("nightly-") {
-        ("nightly".to_string(), version.to_string())
+        Ok(("nightly".to_string(), version.to_string()))
     } else if version.starts_with(|c: char| c.is_ascii_digit()) {
         let s = format!("v{version}");
-        (s.clone(), s)
+        Ok((s.clone(), s))
     } else {
-        (version.to_string(), version.to_string())
+        Ok((version.to_string(), version.to_string()))
     }
+}
+
+fn is_full_commit_hash(version: &str) -> bool {
+    version.len() == 40 && version.as_bytes().iter().all(u8::is_ascii_hexdigit)
 }
 
 fn bin_name(name: &str) -> String {
@@ -1038,22 +1048,40 @@ mod tests {
     fn normalize_version_cases() {
         // `nightly-<sha>` -> asset version "nightly", tag is the literal sha tag.
         assert_eq!(
-            normalize_version("nightly-abc123"),
+            normalize_version("nightly-abc123").unwrap(),
             ("nightly".to_string(), "nightly-abc123".to_string())
         );
         // Bare semver gets a `v` prefix for both asset version and tag.
-        assert_eq!(normalize_version("1.5.0"), ("v1.5.0".to_string(), "v1.5.0".to_string()));
-        assert_eq!(normalize_version("v1.5.0"), ("v1.5.0".to_string(), "v1.5.0".to_string()));
+        assert_eq!(
+            normalize_version("1.5.0").unwrap(),
+            ("v1.5.0".to_string(), "v1.5.0".to_string())
+        );
+        assert_eq!(
+            normalize_version("v1.5.0").unwrap(),
+            ("v1.5.0".to_string(), "v1.5.0".to_string())
+        );
         // Arbitrary `nightly*` strings are not the nightly channel.
         assert_eq!(
-            normalize_version("nightlyfoo"),
+            normalize_version("nightlyfoo").unwrap(),
             ("nightlyfoo".to_string(), "nightlyfoo".to_string())
         );
         // Branch/custom names pass through untouched.
         assert_eq!(
-            normalize_version("foundry-rs-branch-master"),
+            normalize_version("foundry-rs-branch-master").unwrap(),
             ("foundry-rs-branch-master".to_string(), "foundry-rs-branch-master".to_string())
         );
+
+        let err = normalize_version("f83bad912a9dba7bf0371def1e70bb1896048356").unwrap_err();
+        assert!(err.to_string().contains("use `--commit"));
+    }
+
+    #[test]
+    fn is_full_commit_hash_cases() {
+        assert!(is_full_commit_hash("f83bad912a9dba7bf0371def1e70bb1896048356"));
+        assert!(is_full_commit_hash("F83BAD912A9DBA7BF0371DEF1E70BB1896048356"));
+        assert!(!is_full_commit_hash("f83bad9"));
+        assert!(!is_full_commit_hash("g83bad912a9dba7bf0371def1e70bb1896048356"));
+        assert!(!is_full_commit_hash("v1.7.0"));
     }
 
     #[test]
