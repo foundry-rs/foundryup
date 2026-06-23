@@ -1,3 +1,4 @@
+use digest_io::IoWrapper;
 use eyre::{Result, WrapErr, bail};
 use fs_err as fs;
 use futures_util::StreamExt;
@@ -203,9 +204,9 @@ impl Downloader {
 
 pub(crate) fn compute_sha256(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256::new();
+    let mut hasher = IoWrapper(Sha256::new());
     std::io::copy(&mut file, &mut hasher)?;
-    Ok(hex::encode(hasher.finalize()))
+    Ok(hex::encode(hasher.0.finalize()))
 }
 
 pub(crate) fn extract_tar_gz(archive_path: &Path, dest_dir: &Path) -> Result<()> {
