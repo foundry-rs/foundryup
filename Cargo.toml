@@ -35,8 +35,8 @@ vergen-gitcl = { version = "1", features = ["build", "rustc"] }
 
 [dependencies]
 # async
-reqwest = { version = "0.12", default-features = false, features = [
-    "rustls-tls",
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
     "gzip",
     "stream",
 ] }
@@ -59,13 +59,14 @@ home = "0.5"
 indicatif = "0.18"
 semver = "1"
 serde_json = "1"
-sha2 = "0.10"
+digest-io = "0.1"
+sha2 = "0.11"
 sysinfo = "0.36"
 tar = "0.4"
 tempfile = "3"
 self-replace = "1"
 which = "8"
-zip = { version = "6", default-features = false, features = ["deflate"] }
+zip = { version = "7", default-features = false, features = ["deflate"] }
 
 # tracing
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -73,4 +74,4 @@ tracing = "0.1"
 color-eyre = "0.6.5"
 
 [dev-dependencies]
-snapbox = "0.6"
+snapbox = "1.2"
