@@ -74,6 +74,9 @@ impl Config {
 
             if self.is_legacy_version_dir(&path) {
                 let new_path = self.version_dir(default_repo, &name);
+                if new_path.exists() {
+                    continue;
+                }
                 fs::create_dir_all(new_path.parent().unwrap())?;
                 say!("migrating legacy version '{name}' to {default_repo}/{name}");
                 fs::rename(&path, &new_path)?;
