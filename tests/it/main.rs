@@ -432,3 +432,34 @@ foundryup: migrating legacy version [..]
     assert!(versions_dir.join("foundry-rs/foundry/nightly").exists());
     assert!(versions_dir.join("foundry-rs/foundry/stable").exists());
 }
+
+#[test]
+fn migrate_legacy_versions_skips_existing_target() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+    let versions_dir = foundry_dir.join("versions");
+    let legacy_dir = versions_dir.join("nightly");
+    let version_dir = versions_dir.join("foundry-rs/foundry/nightly");
+
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    std::fs::create_dir_all(&version_dir).unwrap();
+
+    for bin in BINS {
+        write_fake_bin(&legacy_dir.join(format!("{bin}{EXE_SUFFIX}")));
+        write_fake_bin(&version_dir.join(format!("{bin}{EXE_SUFFIX}")));
+    }
+
+    foundryup()
+        .env("FOUNDRY_DIR", &foundry_dir)
+        .arg("--list")
+        .assert()
+        .success()
+        .stdout_eq(str![[r#"
+foundryup: foundry-rs/foundry nightly
+...
+"#]])
+        .stderr_eq("");
+
+    assert!(legacy_dir.exists());
+    assert!(version_dir.exists());
+}
