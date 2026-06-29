@@ -51,7 +51,7 @@ jobs:
             platform: win32
             arch: amd64
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -89,7 +89,7 @@ jobs:
 
       - name: Generate attestation
         id: attestation
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@v4.1.0
         with:
           subject-path: ${{ steps.artifacts.outputs.bin_name }}
 
@@ -116,7 +116,7 @@ jobs:
     needs: build
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
