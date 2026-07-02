@@ -139,6 +139,29 @@ For more information, try '--help'.
 "#]]);
 }
 
+// `--update` is handled before the `--list`/`--use` command modes, so combining
+// them must error at parse time instead of silently self-updating.
+#[test]
+fn update_conflicts_with_list_and_use() {
+    foundryup().args(["--list", "--update"]).assert().failure().stderr_eq(str![[r#"
+error: the argument '--list' cannot be used with '--update'
+
+Usage: foundryup[EXE] --list
+
+For more information, try '--help'.
+
+"#]]);
+
+    foundryup().args(["--use", "v1.0.0", "--update"]).assert().failure().stderr_eq(str![[r#"
+error: the argument '--use <VERSION>' cannot be used with '--update'
+
+Usage: foundryup[EXE] --use <VERSION>
+
+For more information, try '--help'.
+
+"#]]);
+}
+
 // An empty `--use` value is rejected, not defaulted (matching the shell installer).
 #[test]
 fn use_empty_version_errors() {

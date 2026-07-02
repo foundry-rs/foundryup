@@ -126,7 +126,7 @@ async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> R
         let src = local_path.join("target").join(target_dir).join(bin_name(bin));
         let dest = config.bin_path(bin);
 
-        remove_if_exists(&dest)?;
+        clear_active_bin(config, bin)?;
 
         #[cfg(unix)]
         std::os::unix::fs::symlink(&src, &dest)?;
@@ -713,7 +713,7 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
 
         let old_version = if dest.exists() { get_bin_version(&dest).ok() } else { None };
 
-        remove_if_exists(&dest)?;
+        clear_active_bin(config, bin)?;
 
         #[cfg(unix)]
         std::os::unix::fs::symlink(&src, &dest)?;
@@ -871,6 +871,16 @@ fn bin_name(name: &str) -> String {
 /// Fails with a clear error if `cmd` is not available on `PATH`.
 fn need_cmd(cmd: &str) -> Result<()> {
     which::which(cmd).map(|_| ()).map_err(|_| eyre::eyre!("need '{cmd}' (command not found)"))
+}
+
+/// Removes any previously activated `bin` from the bin dir, clearing both the
+/// bare and `.exe` names. On Windows the active name is `<bin>.exe`, so clearing
+/// only that leaves a stale bare `<bin>` (e.g. from the legacy bash foundryup)
+/// that could shadow the new one; on Unix the `.exe` removal is a no-op.
+fn clear_active_bin(config: &Config, bin: &str) -> Result<()> {
+    remove_if_exists(&config.bin_dir.join(bin))?;
+    remove_if_exists(&config.bin_dir.join(format!("{bin}.exe")))?;
+    Ok(())
 }
 
 /// Removes `path` if it exists, including dangling symlinks.
@@ -1122,5 +1132,42 @@ mod tests {
 
         let hashes = parse_attestation_payload(s).unwrap();
         assert!(!hashes.is_empty());
+    }
+
+    fn test_config(foundry_dir: &Path) -> Config {
+        Config {
+            foundry_dir: foundry_dir.to_path_buf(),
+            versions_dir: foundry_dir.join("versions"),
+            bin_dir: foundry_dir.join("bin"),
+            man_dir: foundry_dir.join("share/man/man1"),
+            network: crate::config::NetworkConfig::FOUNDRY,
+        }
+    }
+
+    #[test]
+    fn clear_active_bin_removes_bare_and_exe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        fs::create_dir_all(&config.bin_dir).unwrap();
+
+        // Simulate a stale bare `forge` (e.g. from the legacy bash foundryup)
+        // alongside a stale `forge.exe`.
+        fs::write(config.bin_dir.join("forge"), b"stale").unwrap();
+        fs::write(config.bin_dir.join("forge.exe"), b"stale").unwrap();
+
+        clear_active_bin(&config, "forge").unwrap();
+
+        assert!(!config.bin_dir.join("forge").exists(), "bare forge should be removed");
+        assert!(!config.bin_dir.join("forge.exe").exists(), "forge.exe should be removed");
+    }
+
+    #[test]
+    fn clear_active_bin_ok_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        fs::create_dir_all(&config.bin_dir).unwrap();
+
+        // Nothing to remove: clearing must still succeed.
+        clear_active_bin(&config, "forge").unwrap();
     }
 }
