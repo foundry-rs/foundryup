@@ -1,7 +1,7 @@
-//! Tests that exercise `check_bins_in_use`, which scans for running
-//! `forge`/`cast`/`anvil`/`chisel` processes globally and also spawns those
-//! binaries themselves. They must not run concurrently, so they live in this
-//! module to be matched by a single nextest filter (see `.config/nextest.toml`).
+//! Tests that exercise `check_bins_in_use`, which scans for running Foundry
+//! processes globally and also spawns the required binaries themselves. They
+//! must not run concurrently, so they live in this module to be matched by a
+//! single nextest filter (see `.config/nextest.toml`).
 
 use super::*;
 use std::path::Path;
@@ -49,7 +49,6 @@ foundryup: - forge [..]
 foundryup: - cast [..]
 foundryup: - anvil [..]
 foundryup: - chisel [..]
-
 ...
 "#]
     ]);

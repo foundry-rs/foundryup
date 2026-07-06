@@ -87,7 +87,7 @@ impl Config {
     }
 
     fn is_legacy_version_dir(&self, path: &Path) -> bool {
-        for bin in NetworkConfig::FOUNDRY.bins {
+        for &(_, bin) in NetworkConfig::FOUNDRY.bins {
             let bin_name = if cfg!(windows) { format!("{bin}.exe") } else { bin.to_string() };
             if path.join(&bin_name).exists() {
                 return true;
@@ -129,17 +129,26 @@ impl Config {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NetworkConfig {
     pub repo: &'static str,
-    pub bins: &'static [&'static str],
+    pub bins: &'static [(bool, &'static str)],
     pub archive_prefix: &'static str,
     pub default_version: &'static str,
     pub display_name: &'static str,
     pub has_attestation: bool,
 }
 
+const REQUIRED: bool = false;
+const OPTIONAL: bool = true;
+
 impl NetworkConfig {
     pub(crate) const FOUNDRY: Self = Self {
         repo: "foundry-rs/foundry",
-        bins: &["forge", "cast", "anvil", "chisel"],
+        bins: &[
+            (REQUIRED, "forge"),
+            (REQUIRED, "cast"),
+            (REQUIRED, "anvil"),
+            (REQUIRED, "chisel"),
+            (OPTIONAL, "solar"),
+        ],
         archive_prefix: "foundry",
         default_version: "stable",
         display_name: "foundry",

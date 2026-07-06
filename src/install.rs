@@ -122,10 +122,17 @@ async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> R
     }
 
     let target_dir = profile_target_dir(&args.cargo_profile);
-    for bin in config.network.bins {
+    for &(optional, bin) in config.network.bins {
         let src = local_path.join("target").join(target_dir).join(bin_name(bin));
-        let dest = config.bin_path(bin);
+        if !src.is_file() {
+            if optional {
+                clear_active_bin(config, bin)?;
+                continue;
+            }
+            bail!("binary {bin} not found at {}", src.display());
+        }
 
+        let dest = config.bin_path(bin);
         clear_active_bin(config, bin)?;
 
         #[cfg(unix)]
@@ -236,7 +243,7 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
 
     let target_dir = profile_target_dir(&args.cargo_profile);
     let build_dir = repo_path.join("target").join(target_dir);
-    for bin in config.network.bins {
+    for &(_, bin) in config.network.bins {
         // Move whichever artifact cargo produced (with or without `.exe`).
         for candidate in [bin.to_string(), format!("{bin}.exe")] {
             let src = build_dir.join(&candidate);
@@ -267,8 +274,12 @@ async fn generate_manpages_from_source(config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    for bin in config.network.bins {
+    for &(_, bin) in config.network.bins {
         let bin_path = config.bin_path(bin);
+        if !bin_path.is_file() {
+            continue;
+        }
+
         let man_path = config.man_dir.join(format!("{bin}.1"));
 
         // Create/truncate the destination first, matching the shell's `> file`.
@@ -309,7 +320,7 @@ async fn fetch_and_verify_attestation(
     tag: &str,
     target: &Target,
 ) -> Result<PrebuiltCheck> {
-    let bins = config.network.bins;
+    let bins = config.network.bins.iter().map(|&(_, bin)| bin).collect::<Vec<_>>();
     say!("checking if {} for {tag} version are already installed", bins.join(", "));
 
     let attestation_url = format!(
@@ -345,34 +356,11 @@ async fn fetch_and_verify_attestation(
 
     let version_dir = config.version_dir(repo, tag);
 
-    if version_dir.exists() {
-        let mut all_match = true;
-        for bin in bins {
-            let bin_name = bin_name(bin);
-            let expected = hashes.get(*bin).or_else(|| hashes.get(&bin_name));
-            let path = version_dir.join(&bin_name);
-
-            match expected {
-                Some(expected_hash) if is_executable(&path) => {
-                    let actual = compute_sha256(&path)?;
-                    if actual != *expected_hash {
-                        all_match = false;
-                        break;
-                    }
-                }
-                _ => {
-                    all_match = false;
-                    break;
-                }
-            }
-        }
-
-        if all_match {
-            say!("version {tag} already installed and verified, activating...");
-            use_version(config, repo, tag)?;
-            say!("done!");
-            return Ok(PrebuiltCheck::AlreadyActivated);
-        }
+    if version_dir.exists() && installed_bins_match_hashes(config, &version_dir, &hashes)? {
+        say!("version {tag} already installed and verified, activating...");
+        use_version(config, repo, tag)?;
+        say!("done!");
+        return Ok(PrebuiltCheck::AlreadyActivated);
     }
 
     say!("binaries not found or do not match expected hashes, downloading new binaries");
@@ -404,6 +392,36 @@ fn parse_attestation_payload(json: &str) -> Result<HashMap<String, String>> {
     Ok(hashes)
 }
 
+fn installed_bins_match_hashes(
+    config: &Config,
+    version_dir: &Path,
+    hashes: &HashMap<String, String>,
+) -> Result<bool> {
+    for &(optional, bin) in config.network.bins {
+        let bin_name = bin_name(bin);
+        let Some(expected_hash) = expected_hash(hashes, bin, &bin_name) else {
+            if optional && !version_dir.join(&bin_name).exists() {
+                continue;
+            }
+            return Ok(false);
+        };
+        let path = version_dir.join(&bin_name);
+        if !is_executable(&path) || compute_sha256(&path)? != *expected_hash {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn expected_hash<'a>(
+    hashes: &'a HashMap<String, String>,
+    bin: &str,
+    bin_name: &str,
+) -> Option<&'a String> {
+    hashes.get(bin).or_else(|| hashes.get(bin_name))
+}
+
 async fn download_and_extract(
     config: &Config,
     repo: &str,
@@ -431,6 +449,7 @@ async fn download_and_extract(
 
     let version_dir = config.version_dir(repo, tag);
     fs::create_dir_all(&version_dir)?;
+    clear_version_bins(config, &version_dir)?;
 
     if target.platform == Platform::Win32 {
         extract_zip(&archive_path, &version_dir)?;
@@ -453,6 +472,14 @@ async fn download_and_extract(
     Ok(())
 }
 
+fn clear_version_bins(config: &Config, version_dir: &Path) -> Result<()> {
+    for &(_, bin) in config.network.bins {
+        remove_if_exists(&version_dir.join(bin))?;
+        remove_if_exists(&version_dir.join(format!("{bin}.exe")))?;
+    }
+    Ok(())
+}
+
 fn verify_installed_binaries(
     config: &Config,
     repo: &str,
@@ -464,33 +491,32 @@ fn verify_installed_binaries(
     let version_dir = config.version_dir(repo, tag);
     let mut failed = false;
 
-    for bin in config.network.bins {
+    for &(optional, bin) in config.network.bins {
         let bin_name = bin_name(bin);
-        let expected = hashes.get(*bin).or_else(|| hashes.get(&bin_name));
         let path = version_dir.join(&bin_name);
-
-        match expected {
-            None => {
-                say!("no expected hash for {bin}");
-                failed = true;
+        let Some(expected_hash) = expected_hash(hashes, bin, &bin_name) else {
+            if optional && !path.exists() {
+                continue;
             }
-            Some(expected_hash) => {
-                if !is_executable(&path) {
-                    say!("binary {bin} not found at {}", path.display());
-                    failed = true;
-                    continue;
-                }
+            say!("no expected hash for {bin}");
+            failed = true;
+            continue;
+        };
 
-                let actual = compute_sha256(&path)?;
-                if actual != *expected_hash {
-                    say!("{bin} hash verification failed:");
-                    say!("  expected: {expected_hash}");
-                    say!("  actual:   {actual}");
-                    failed = true;
-                } else {
-                    say!("{bin} verified ✓");
-                }
-            }
+        if !is_executable(&path) {
+            say!("binary {bin} not found at {}", path.display());
+            failed = true;
+            continue;
+        }
+
+        let actual = compute_sha256(&path)?;
+        if actual != *expected_hash {
+            say!("{bin} hash verification failed:");
+            say!("  expected: {expected_hash}");
+            say!("  actual:   {actual}");
+            failed = true;
+        } else {
+            say!("{bin} verified ✓");
         }
     }
 
@@ -533,8 +559,6 @@ async fn download_manpages(
 }
 
 pub(crate) fn list(config: &Config) -> Result<()> {
-    let bins = config.network.bins;
-
     if config.versions_dir.exists() {
         for owner_entry in fs::read_dir(&config.versions_dir)? {
             let owner_entry = owner_entry?;
@@ -568,9 +592,12 @@ pub(crate) fn list(config: &Config) -> Result<()> {
 
                     tell!("{owner_name}/{repo_name} {version_name}");
 
-                    // A missing or non-runnable binary is a broken install.
-                    for bin in bins {
+                    for &(optional, bin) in config.network.bins {
                         let bin_path = version_path.join(bin_name(bin));
+                        if optional && !bin_path.exists() {
+                            continue;
+                        }
+
                         let v = get_bin_version(&bin_path).wrap_err_with(|| {
                             format!(
                                 "{owner_name}/{repo_name} {version_name} is broken: \
@@ -585,7 +612,7 @@ pub(crate) fn list(config: &Config) -> Result<()> {
             }
         }
     } else {
-        for bin in bins {
+        for &(_, bin) in config.network.bins {
             let bin_path = config.bin_path(bin);
             if bin_path.exists() {
                 match get_bin_version(&bin_path) {
@@ -702,49 +729,62 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
     crate::process::check_bins_in_use(config)?;
     fs::create_dir_all(&config.bin_dir)?;
 
-    for bin in config.network.bins {
+    for &(optional, bin) in config.network.bins {
         let bin_name = bin_name(bin);
         let src = version_dir.join(&bin_name);
-        let dest = config.bin_path(bin);
 
         if !src.is_file() {
+            if optional {
+                clear_active_bin(config, bin)?;
+                continue;
+            }
             bail!("binary {bin} not found in version {version} at {}", src.display());
         }
 
-        let old_version = if dest.exists() { get_bin_version(&dest).ok() } else { None };
+        activate_bin(config, version, bin, &src)?;
+    }
 
-        clear_active_bin(config, bin)?;
+    Ok(())
+}
 
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&src, &dest)?;
-        #[cfg(not(unix))]
-        fs::copy(&src, &dest)?;
+fn activate_bin(config: &Config, version: &str, bin: &str, src: &Path) -> Result<()> {
+    let dest = config.bin_path(bin);
+    let old_version = if dest.exists() { get_bin_version(&dest).ok() } else { None };
 
-        let v = get_bin_version(&dest)
-            .wrap_err_with(|| format!("failed to run {bin} after activating version {version}"))?;
-        match old_version {
-            Some(old) if old != v => say!("use - {v} (from {old})"),
-            _ => say!("use - {v}"),
-        }
+    clear_active_bin(config, bin)?;
 
-        if let Ok(which_path) = which::which(bin) {
-            if which_path != dest {
-                warn!("");
-                eprintln!(
-                    r#"There are multiple binaries with the name '{bin}' present in your 'PATH'.
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(src, &dest)?;
+    #[cfg(not(unix))]
+    fs::copy(src, &dest)?;
+
+    let v = get_bin_version(&dest)
+        .wrap_err_with(|| format!("failed to run {bin} after activating version {version}"))?;
+    match old_version {
+        Some(old) if old != v => say!("use - {v} (from {old})"),
+        _ => say!("use - {v}"),
+    }
+
+    warn_if_shadowed(config, bin, &dest);
+    Ok(())
+}
+
+fn warn_if_shadowed(config: &Config, bin: &str, dest: &Path) {
+    if let Ok(which_path) = which::which(bin) {
+        if which_path != dest {
+            warn!("");
+            eprintln!(
+                r#"There are multiple binaries with the name '{bin}' present in your 'PATH'.
 This may be the result of installing '{bin}' using another method,
 like Cargo or other package managers.
 You may need to run 'rm {which_path}' or move '{bin_dir}'
 in your 'PATH' to allow the newly installed version to take precedence!
 "#,
-                    which_path = which_path.display(),
-                    bin_dir = config.bin_dir.display()
-                );
-            }
+                which_path = which_path.display(),
+                bin_dir = config.bin_dir.display()
+            );
         }
     }
-
-    Ok(())
 }
 
 /// Resolves a requested version string to its `(version, tag)` pair, where `tag`
@@ -934,6 +974,9 @@ fn rustflags() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn latest_nightly_release_tag_selects_newest_published_at() {
@@ -1142,6 +1185,88 @@ mod tests {
             man_dir: foundry_dir.join("share/man/man1"),
             network: crate::config::NetworkConfig::FOUNDRY,
         }
+    }
+
+    fn write_executable(path: &Path, contents: &[u8]) {
+        fs::write(path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).unwrap();
+        }
+    }
+
+    fn write_hashed_bin(version_dir: &Path, hashes: &mut HashMap<String, String>, bin: &str) {
+        let path = version_dir.join(bin_name(bin));
+        write_executable(&path, bin.as_bytes());
+        hashes.insert(bin.to_string(), compute_sha256(&path).unwrap());
+    }
+
+    fn write_required_hashed_bins(version_dir: &Path, config: &Config) -> HashMap<String, String> {
+        let mut hashes = HashMap::new();
+        for &(optional, bin) in config.network.bins {
+            if optional {
+                continue;
+            }
+            write_hashed_bin(version_dir, &mut hashes, bin);
+        }
+        hashes
+    }
+
+    #[test]
+    fn verification_allows_missing_optional_bin_without_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let version_dir = config.version_dir(config.network.repo, "v1.0.0");
+        fs::create_dir_all(&version_dir).unwrap();
+        let hashes = write_required_hashed_bins(&version_dir, &config);
+
+        assert!(installed_bins_match_hashes(&config, &version_dir, &hashes).unwrap());
+        verify_installed_binaries(&config, config.network.repo, "v1.0.0", &hashes).unwrap();
+    }
+
+    #[test]
+    fn verification_requires_expected_optional_bin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let version_dir = config.version_dir(config.network.repo, "v1.0.0");
+        fs::create_dir_all(&version_dir).unwrap();
+        let mut hashes = write_required_hashed_bins(&version_dir, &config);
+        hashes.insert("solar".to_string(), "0".repeat(64));
+
+        assert!(!installed_bins_match_hashes(&config, &version_dir, &hashes).unwrap());
+        let err =
+            verify_installed_binaries(&config, config.network.repo, "v1.0.0", &hashes).unwrap_err();
+        assert!(err.to_string().contains("one or more binaries failed"));
+    }
+
+    #[test]
+    fn verification_rejects_unhashed_optional_bin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let version_dir = config.version_dir(config.network.repo, "v1.0.0");
+        fs::create_dir_all(&version_dir).unwrap();
+        let hashes = write_required_hashed_bins(&version_dir, &config);
+        write_executable(&version_dir.join(bin_name("solar")), b"solar");
+
+        assert!(!installed_bins_match_hashes(&config, &version_dir, &hashes).unwrap());
+        let err =
+            verify_installed_binaries(&config, config.network.repo, "v1.0.0", &hashes).unwrap_err();
+        assert!(err.to_string().contains("one or more binaries failed"));
+    }
+
+    #[test]
+    fn verification_accepts_hashed_optional_bin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let version_dir = config.version_dir(config.network.repo, "v1.0.0");
+        fs::create_dir_all(&version_dir).unwrap();
+        let mut hashes = write_required_hashed_bins(&version_dir, &config);
+        write_hashed_bin(&version_dir, &mut hashes, "solar");
+
+        assert!(installed_bins_match_hashes(&config, &version_dir, &hashes).unwrap());
+        verify_installed_binaries(&config, config.network.repo, "v1.0.0", &hashes).unwrap();
     }
 
     #[test]

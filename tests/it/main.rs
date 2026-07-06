@@ -2,6 +2,7 @@ use snapbox::{cmd::Command, str};
 use std::env::consts::EXE_SUFFIX;
 
 const BINS: &[&str] = &["forge", "cast", "anvil", "chisel"];
+const OPTIONAL_BINS: &[&str] = &["solar"];
 
 mod foundry_bins;
 mod installer_script;
@@ -243,6 +244,53 @@ fn use_version_normalizes_bare_semver() {
     }
 }
 
+#[test]
+fn use_version_allows_missing_optional_bin() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+    let version_dir = foundry_dir.join("versions/foundry-rs/foundry/v1.5.0");
+    let bin_dir = foundry_dir.join("bin");
+    std::fs::create_dir_all(&version_dir).unwrap();
+    std::fs::create_dir_all(&bin_dir).unwrap();
+
+    for bin in BINS {
+        write_fake_bin(&version_dir.join(format!("{bin}{EXE_SUFFIX}")));
+    }
+    for bin in OPTIONAL_BINS {
+        write_fake_bin(&bin_dir.join(format!("{bin}{EXE_SUFFIX}")));
+    }
+
+    foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["--use", "1.5.0"]).assert().success();
+
+    for &bin in BINS {
+        let name = format!("{bin}{EXE_SUFFIX}");
+        assert!(bin_dir.join(&name).exists(), "{name} was not activated");
+    }
+    for &bin in OPTIONAL_BINS {
+        let name = format!("{bin}{EXE_SUFFIX}");
+        assert!(!bin_dir.join(&name).exists(), "{name} should have been cleared");
+    }
+}
+
+#[test]
+fn use_version_activates_optional_bin_when_present() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+    let version_dir = foundry_dir.join("versions/foundry-rs/foundry/v1.5.0");
+    std::fs::create_dir_all(&version_dir).unwrap();
+
+    for bin in BINS.iter().chain(OPTIONAL_BINS) {
+        write_fake_bin(&version_dir.join(format!("{bin}{EXE_SUFFIX}")));
+    }
+
+    foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["--use", "1.5.0"]).assert().success();
+
+    for &bin in OPTIONAL_BINS {
+        let name = format!("{bin}{EXE_SUFFIX}");
+        assert!(foundry_dir.join("bin").join(&name).exists(), "{name} was not activated");
+    }
+}
+
 // `--use` activates a digit-prefixed non-semver name verbatim, without the `v`
 // prefix applied to semver versions.
 #[test]
@@ -399,7 +447,31 @@ foundryup: foundry-rs/foundry v1.0.0
     ]);
 }
 
-// A version directory missing a binary fails the listing.
+#[test]
+fn list_includes_optional_bin_when_present() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+    let version_dir = foundry_dir.join("versions/foundry-rs/foundry/v1.0.0");
+    std::fs::create_dir_all(&version_dir).unwrap();
+
+    for bin in BINS.iter().chain(OPTIONAL_BINS) {
+        write_fake_bin(&version_dir.join(format!("{bin}{EXE_SUFFIX}")));
+    }
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_foundryup"))
+        .env("NO_COLOR", "1")
+        .env("FOUNDRY_DIR", &foundry_dir)
+        .arg("--list")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let bin_count = stdout.lines().filter(|line| line.starts_with("foundryup: - ")).count();
+    assert_eq!(bin_count, BINS.len() + OPTIONAL_BINS.len());
+}
+
+// A version directory missing a required binary fails the listing.
 #[test]
 fn list_fails_on_broken_install() {
     let temp_dir = tempfile::Builder::new().tempdir().unwrap();
