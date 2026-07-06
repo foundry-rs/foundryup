@@ -89,7 +89,7 @@ jobs:
 
       - name: Generate attestation
         id: attestation
-        uses: actions/attest-build-provenance@v4.1.0
+        uses: actions/attest-build-provenance@v4.1.1
         with:
           subject-path: ${{ steps.artifacts.outputs.bin_name }}
 
