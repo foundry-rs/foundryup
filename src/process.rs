@@ -22,7 +22,7 @@ pub(crate) fn check_bins_in_use(config: &Config) -> Result<()> {
         })
         .map(Process::name);
 
-    let bins = config.network.bins.iter().map(|&(_, bin)| bin).collect::<Vec<_>>();
+    let bins = config.network.bins.iter().map(|bin| bin.name).collect::<Vec<_>>();
     if let Some(bin) = detect_in_use(&bins, names) {
         bail!("'{bin}' is currently running. Please stop the process and try again.");
     }

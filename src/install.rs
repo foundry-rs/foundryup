@@ -1,6 +1,6 @@
 use crate::{
     cli::Cli,
-    config::Config,
+    config::{Bin, Config},
     download::{Downloader, compute_sha256, extract_tar_gz, extract_zip},
     platform::{Platform, Target},
     say, tell, warn,
@@ -122,7 +122,7 @@ async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> R
     }
 
     let target_dir = profile_target_dir(&args.cargo_profile);
-    for &(optional, bin) in config.network.bins {
+    for &Bin { optional, name: bin } in config.network.bins {
         let src = local_path.join("target").join(target_dir).join(bin_name(bin));
         if !src.is_file() {
             if optional {
@@ -243,7 +243,7 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
 
     let target_dir = profile_target_dir(&args.cargo_profile);
     let build_dir = repo_path.join("target").join(target_dir);
-    for &(_, bin) in config.network.bins {
+    for &Bin { name: bin, .. } in config.network.bins {
         // Move whichever artifact cargo produced (with or without `.exe`).
         for candidate in [bin.to_string(), format!("{bin}.exe")] {
             let src = build_dir.join(&candidate);
@@ -274,7 +274,7 @@ async fn generate_manpages_from_source(config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    for &(_, bin) in config.network.bins {
+    for &Bin { name: bin, .. } in config.network.bins {
         let bin_path = config.bin_path(bin);
         if !bin_path.is_file() {
             continue;
@@ -320,7 +320,7 @@ async fn fetch_and_verify_attestation(
     tag: &str,
     target: &Target,
 ) -> Result<PrebuiltCheck> {
-    let bins = config.network.bins.iter().map(|&(_, bin)| bin).collect::<Vec<_>>();
+    let bins = config.network.bins.iter().map(|bin| bin.name).collect::<Vec<_>>();
     say!("checking if {} for {tag} version are already installed", bins.join(", "));
 
     let attestation_url = format!(
@@ -397,7 +397,7 @@ fn installed_bins_match_hashes(
     version_dir: &Path,
     hashes: &HashMap<String, String>,
 ) -> Result<bool> {
-    for &(optional, bin) in config.network.bins {
+    for &Bin { optional, name: bin } in config.network.bins {
         let bin_name = bin_name(bin);
         let Some(expected_hash) = expected_hash(hashes, bin, &bin_name) else {
             if optional && !version_dir.join(&bin_name).exists() {
@@ -473,7 +473,7 @@ async fn download_and_extract(
 }
 
 fn clear_version_bins(config: &Config, version_dir: &Path) -> Result<()> {
-    for &(_, bin) in config.network.bins {
+    for &Bin { name: bin, .. } in config.network.bins {
         remove_if_exists(&version_dir.join(bin))?;
         remove_if_exists(&version_dir.join(format!("{bin}.exe")))?;
     }
@@ -491,7 +491,7 @@ fn verify_installed_binaries(
     let version_dir = config.version_dir(repo, tag);
     let mut failed = false;
 
-    for &(optional, bin) in config.network.bins {
+    for &Bin { optional, name: bin } in config.network.bins {
         let bin_name = bin_name(bin);
         let path = version_dir.join(&bin_name);
         let Some(expected_hash) = expected_hash(hashes, bin, &bin_name) else {
@@ -592,7 +592,7 @@ pub(crate) fn list(config: &Config) -> Result<()> {
 
                     tell!("{owner_name}/{repo_name} {version_name}");
 
-                    for &(optional, bin) in config.network.bins {
+                    for &Bin { optional, name: bin } in config.network.bins {
                         let bin_path = version_path.join(bin_name(bin));
                         if optional && !bin_path.exists() {
                             continue;
@@ -612,7 +612,7 @@ pub(crate) fn list(config: &Config) -> Result<()> {
             }
         }
     } else {
-        for &(_, bin) in config.network.bins {
+        for &Bin { name: bin, .. } in config.network.bins {
             let bin_path = config.bin_path(bin);
             if bin_path.exists() {
                 match get_bin_version(&bin_path) {
@@ -729,7 +729,7 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
     crate::process::check_bins_in_use(config)?;
     fs::create_dir_all(&config.bin_dir)?;
 
-    for &(optional, bin) in config.network.bins {
+    for &Bin { optional, name: bin } in config.network.bins {
         let bin_name = bin_name(bin);
         let src = version_dir.join(&bin_name);
 
@@ -1205,7 +1205,7 @@ mod tests {
 
     fn write_required_hashed_bins(version_dir: &Path, config: &Config) -> HashMap<String, String> {
         let mut hashes = HashMap::new();
-        for &(optional, bin) in config.network.bins {
+        for &Bin { optional, name: bin } in config.network.bins {
             if optional {
                 continue;
             }
