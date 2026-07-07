@@ -7,6 +7,7 @@ use crate::{
 };
 use eyre::{Result, WrapErr, bail};
 use fs_err as fs;
+use itertools::Itertools;
 use std::{collections::HashMap, path::Path};
 
 pub(crate) async fn run(config: &Config, args: &Cli) -> Result<()> {
@@ -320,8 +321,10 @@ async fn fetch_and_verify_attestation(
     tag: &str,
     target: &Target,
 ) -> Result<PrebuiltCheck> {
-    let bins = config.network.bins.iter().map(|bin| bin.name).collect::<Vec<_>>();
-    say!("checking if {} for {tag} version are already installed", bins.join(", "));
+    say!(
+        "checking if {} for {tag} version are already installed",
+        config.network.bins.iter().map(|bin| bin.name).format(", ")
+    );
 
     let attestation_url = format!(
         "{release_url}foundry_{version}_{platform}_{arch}.attestation.txt",
