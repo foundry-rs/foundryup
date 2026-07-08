@@ -30,6 +30,14 @@ inherits = "release"
 lto = "fat"
 codegen-units = 1
 
+[profile.dev.package]
+crc32fast.opt-level = 3
+flate2.opt-level = 3
+miniz_oxide.opt-level = 3
+tar.opt-level = 3
+zip.opt-level = 3
+zlib-rs.opt-level = 3
+
 [build-dependencies]
 vergen-gitcl = { version = "1", features = ["build", "rustc"] }
 
