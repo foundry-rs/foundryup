@@ -9,7 +9,7 @@ use eyre::{Result, WrapErr, bail};
 use fs_err as fs;
 use itertools::Itertools;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::{Path, PathBuf},
 };
 
@@ -113,9 +113,8 @@ async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> R
     let built = build_bins(config, local_path, args).await?;
 
     for &Bin { optional, name: bin } in config.network.bins {
-        if let Some(src) = built_bin_path(&built, bin)
-            && src.is_file()
-        {
+        let src = built_bin_path(&built, bin);
+        if src.is_file() {
             let dest = config.bin_path(bin);
             clear_active_bin(config, bin)?;
 
@@ -126,7 +125,7 @@ async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> R
         } else if optional {
             clear_active_bin(config, bin)?;
         } else {
-            bail!("binary {bin} not found at {}", built.build_dir.join(bin_name(bin)).display());
+            bail!("binary {bin} not found at {}", src.display());
         }
     }
 
@@ -222,11 +221,11 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
 #[derive(Debug)]
 struct BuiltBins {
     build_dir: PathBuf,
-    names: HashSet<String>,
 }
 
 async fn build_bins(config: &Config, repo_path: &Path, args: &Cli) -> Result<BuiltBins> {
-    let built = cargo_build_plan(config, repo_path, args).await?;
+    let built = BuiltBins { build_dir: cargo_build_dir(repo_path, &args.cargo_profile) };
+    clear_built_bins(config, &built.build_dir)?;
 
     let mut cmd = tokio::process::Command::new("cargo");
     cmd.arg("build").arg("--bins").arg("--profile").arg(&args.cargo_profile).current_dir(repo_path);
@@ -247,62 +246,23 @@ async fn build_bins(config: &Config, repo_path: &Path, args: &Cli) -> Result<Bui
     Ok(built)
 }
 
-async fn cargo_build_plan(config: &Config, repo_path: &Path, args: &Cli) -> Result<BuiltBins> {
-    let mut cmd = tokio::process::Command::new("cargo");
-    cmd.args(["metadata", "--format-version", "1", "--no-deps"]).current_dir(repo_path);
-
-    if let Some(ref features) = args.cargo_features {
-        cmd.arg("--features").arg(features);
-    }
-
-    let output = cmd.output().await.wrap_err("failed to run cargo metadata")?;
-    if !output.status.success() {
-        eprint!("{}", String::from_utf8_lossy(&output.stderr));
-        bail!("cargo metadata failed");
-    }
-
-    cargo_build_plan_from_metadata(config, &args.cargo_profile, &output.stdout)
-}
-
-fn cargo_build_plan_from_metadata(
-    config: &Config,
-    profile: &str,
-    metadata: &[u8],
-) -> Result<BuiltBins> {
-    let metadata: serde_json::Value = serde_json::from_slice(metadata)?;
-    let target_dir = metadata["target_directory"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("cargo metadata did not include target_directory"))?;
-    let build_dir = PathBuf::from(target_dir).join(profile_target_dir(profile));
-
-    let mut names = HashSet::new();
-    let packages = metadata["packages"]
-        .as_array()
-        .ok_or_else(|| eyre::eyre!("cargo metadata did not include packages"))?;
-
-    for package in packages {
-        if let Some(targets) = package["targets"].as_array() {
-            for target in targets {
-                if let Some(name) = target["name"].as_str()
-                    && let Some(kind) = target["kind"].as_array()
-                    && kind.iter().any(|kind| kind.as_str() == Some("bin"))
-                    && config.network.bins.iter().any(|bin| bin.name == name)
-                {
-                    names.insert(name.to_string());
-                }
-            }
-        }
-    }
-
-    Ok(BuiltBins { build_dir, names })
+fn cargo_build_dir(repo_path: &Path, profile: &str) -> PathBuf {
+    repo_path.join("target").join(profile_target_dir(profile))
 }
 
 fn profile_target_dir(profile: &str) -> &str {
     if profile == "dev" { "debug" } else { profile }
 }
 
-fn built_bin_path(built: &BuiltBins, bin: &str) -> Option<PathBuf> {
-    built.names.contains(bin).then(|| built.build_dir.join(bin_name(bin)))
+fn built_bin_path(built: &BuiltBins, bin: &str) -> PathBuf {
+    built.build_dir.join(bin_name(bin))
+}
+
+fn clear_built_bins(config: &Config, build_dir: &Path) -> Result<()> {
+    for &Bin { name: bin, .. } in config.network.bins {
+        remove_if_exists(&build_dir.join(bin_name(bin)))?;
+    }
+    Ok(())
 }
 
 fn copy_built_bins_to_version_dir(
@@ -313,14 +273,13 @@ fn copy_built_bins_to_version_dir(
     clear_version_bins(config, version_dir)?;
 
     for &Bin { optional, name: bin } in config.network.bins {
-        if let Some(src) = built_bin_path(built, bin)
-            && src.is_file()
-        {
+        let src = built_bin_path(built, bin);
+        if src.is_file() {
             let dest = version_dir.join(bin_name(bin));
             remove_if_exists(&dest)?;
             fs::copy(src, &dest)?;
         } else if !optional {
-            bail!("binary {bin} not found at {}", built.build_dir.join(bin_name(bin)).display());
+            bail!("binary {bin} not found at {}", src.display());
         }
     }
 
@@ -1060,7 +1019,7 @@ fn rustflags() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
@@ -1300,68 +1259,29 @@ mod tests {
     }
 
     #[test]
-    fn cargo_build_plan_collects_configured_bin_targets() {
+    fn cargo_build_dir_uses_profile_target_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let config = test_config(tmp.path());
-        let target_dir = tmp.path().join("target");
-        let metadata = serde_json::json!({
-            "target_directory": target_dir.display().to_string(),
-            "packages": [
-                {
-                    "targets": [
-                        { "kind": ["bin"], "name": "forge" },
-                        { "kind": ["bin"], "name": "solar" },
-                        { "kind": ["bin"], "name": "ignored" },
-                        { "kind": ["lib"], "name": "foundry" }
-                    ]
-                }
-            ]
-        })
-        .to_string();
-
-        let built = cargo_build_plan_from_metadata(&config, "dev", metadata.as_bytes()).unwrap();
-
-        assert_eq!(built.build_dir, target_dir.join("debug"));
-        assert!(built.names.contains("forge"));
-        assert!(built.names.contains("solar"));
-        assert!(!built.names.contains("ignored"));
-        assert!(!built.names.contains("foundry"));
+        assert_eq!(cargo_build_dir(tmp.path(), "dev"), tmp.path().join("target/debug"));
+        assert_eq!(cargo_build_dir(tmp.path(), "release"), tmp.path().join("target/release"));
     }
 
     #[test]
-    fn copying_built_bins_ignores_stale_optional_target_file() {
+    fn clearing_built_bins_removes_stale_target_files() {
         let tmp = tempfile::tempdir().unwrap();
         let config = test_config(tmp.path());
         let build_dir = tmp.path().join("build");
-        let version_dir = config.version_dir(config.network.repo, "foundry-rs-branch-master");
         fs::create_dir_all(&build_dir).unwrap();
-        fs::create_dir_all(&version_dir).unwrap();
 
-        let mut names = HashSet::new();
-        for &Bin { optional, name: bin } in config.network.bins {
-            if !optional {
-                let path = build_dir.join(bin_name(bin));
-                write_executable(&path, bin.as_bytes());
-                names.insert(bin.to_string());
-            }
+        for &Bin { name: bin, .. } in config.network.bins {
+            write_executable(&build_dir.join(bin_name(bin)), bin.as_bytes());
         }
-        let built = BuiltBins { build_dir: build_dir.clone(), names };
-        write_executable(&build_dir.join(bin_name("solar")), b"stale target solar");
-        write_executable(&version_dir.join("solar"), b"stale solar");
-        write_executable(&version_dir.join("solar.exe"), b"stale solar exe");
 
-        copy_built_bins_to_version_dir(&config, &built, &version_dir).unwrap();
+        clear_built_bins(&config, &build_dir).unwrap();
 
-        for &Bin { optional, name: bin } in config.network.bins {
-            let path = version_dir.join(bin_name(bin));
-            assert_eq!(path.exists(), !optional, "{} existence mismatch", path.display());
-            if !optional {
-                assert!(build_dir.join(bin_name(bin)).exists(), "{bin} should remain in target");
-            }
+        for &Bin { name: bin, .. } in config.network.bins {
+            let path = build_dir.join(bin_name(bin));
+            assert!(!path.exists(), "{} should be removed", path.display());
         }
-        assert!(!version_dir.join("solar").exists(), "stale bare solar should be removed");
-        assert!(!version_dir.join("solar.exe").exists(), "stale solar.exe should be removed");
-        assert!(build_dir.join(bin_name("solar")).exists(), "stale target solar should be ignored");
     }
 
     #[test]
