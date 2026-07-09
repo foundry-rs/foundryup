@@ -699,6 +699,8 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
         bail!("version {version} not installed for {repo}");
     }
 
+    crate::process::check_bins_in_use(config)?;
+
     // Preflight all bins before mutating: prove each one exists and runs the same
     // semantic check activation relies on, so neither a missing nor a broken
     // binary can leave a mix of old and new binaries active.
@@ -713,7 +715,6 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
         new_versions.push(v);
     }
 
-    crate::process::check_bins_in_use(config)?;
     fs::create_dir_all(&config.bin_dir)?;
 
     for (bin, v) in config.network.bins.iter().zip(new_versions) {
