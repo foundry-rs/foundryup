@@ -428,12 +428,10 @@ fn parse_attestation_payload(json: &str) -> Result<HashMap<String, String>> {
 
     if let Some(subject) = payload_json["subject"].as_array() {
         for entry in subject {
-            if let Some(name) = entry["name"].as_str() {
-                subjects.push(name.to_string());
-            }
-            if let (Some(name), Some(digest)) =
-                (entry["name"].as_str(), entry["digest"]["sha256"].as_str())
-            {
+            let Some(name) = entry["name"].as_str() else { continue };
+            subjects.push(name.to_string());
+
+            if let Some(digest) = entry["digest"]["sha256"].as_str() {
                 hashes.insert(name.to_string(), digest.to_string());
             }
         }
