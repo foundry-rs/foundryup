@@ -244,6 +244,24 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
 
     let target_dir = profile_target_dir(&args.cargo_profile);
     let build_dir = repo_path.join("target").join(target_dir);
+    move_built_bins_to_version_dir(config, &build_dir, &version_dir)?;
+
+    use_version(config, repo, &version)?;
+
+    generate_manpages_from_source(config).await?;
+
+    say!("done");
+
+    Ok(())
+}
+
+fn move_built_bins_to_version_dir(
+    config: &Config,
+    build_dir: &Path,
+    version_dir: &Path,
+) -> Result<()> {
+    clear_version_bins(config, version_dir)?;
+
     for &Bin { name: bin, .. } in config.network.bins {
         // Move whichever artifact cargo produced (with or without `.exe`).
         for candidate in [bin.to_string(), format!("{bin}.exe")] {
@@ -257,12 +275,6 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
             }
         }
     }
-
-    use_version(config, repo, &version)?;
-
-    generate_manpages_from_source(config).await?;
-
-    say!("done");
 
     Ok(())
 }
@@ -1215,6 +1227,34 @@ mod tests {
             write_hashed_bin(version_dir, &mut hashes, bin);
         }
         hashes
+    }
+
+    #[test]
+    fn moving_built_bins_clears_stale_optional_bin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let build_dir = tmp.path().join("build");
+        let version_dir = config.version_dir(config.network.repo, "foundry-rs-branch-master");
+        fs::create_dir_all(&build_dir).unwrap();
+        fs::create_dir_all(&version_dir).unwrap();
+
+        for &Bin { optional, name: bin } in config.network.bins {
+            if !optional {
+                write_executable(&build_dir.join(bin_name(bin)), bin.as_bytes());
+            }
+        }
+        write_executable(&version_dir.join("solar"), b"stale solar");
+        write_executable(&version_dir.join("solar.exe"), b"stale solar exe");
+
+        move_built_bins_to_version_dir(&config, &build_dir, &version_dir).unwrap();
+
+        for &Bin { optional, name: bin } in config.network.bins {
+            let path = version_dir.join(bin_name(bin));
+            assert_eq!(path.exists(), !optional, "{} existence mismatch", path.display());
+            assert!(!build_dir.join(bin_name(bin)).exists(), "{bin} should have been moved");
+        }
+        assert!(!version_dir.join("solar").exists(), "stale bare solar should be removed");
+        assert!(!version_dir.join("solar.exe").exists(), "stale solar.exe should be removed");
     }
 
     #[test]
