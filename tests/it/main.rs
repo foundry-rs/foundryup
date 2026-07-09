@@ -16,9 +16,15 @@ fn foundryup() -> Command {
 /// Activation now runs `<bin> -V` and fails if it cannot execute, so test
 /// fixtures need real executables rather than placeholder text. We reuse the
 /// `foundryup` test binary, which exits 0 and prints a version for `-V` on every
-/// platform (and copying it preserves the executable bit on Unix).
+/// platform. Linking avoids copying the debug test binary for every fake bin.
 fn write_fake_bin(path: &std::path::Path) {
-    std::fs::copy(snapbox::cmd::cargo_bin!("foundryup"), path).unwrap();
+    let source = snapbox::cmd::cargo_bin!("foundryup");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(source, path).unwrap();
+    #[cfg(windows)]
+    std::fs::hard_link(source, path).unwrap();
+    #[cfg(not(any(unix, windows)))]
+    std::fs::copy(source, path).unwrap();
 }
 
 #[test]
