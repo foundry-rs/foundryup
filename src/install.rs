@@ -515,7 +515,7 @@ fn replace_version_bins_from_dir(config: &Config, repo: &str, tag: &str, dir: &P
         if src.is_file() {
             let dest = version_dir.join(bin_name(bin));
             remove_if_exists(&dest)?;
-            fs::rename(&src, &dest)?;
+            fs::copy(&src, &dest)?;
         } else if !optional {
             bail!("binary {bin} not found at {}", src.display());
         }
@@ -776,29 +776,28 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
     // Preflight all bins before mutating: prove each one exists and runs the same
     // semantic check activation relies on, so neither a missing nor a broken
     // binary can leave a mix of old and new binaries active.
-    let mut new_versions = Vec::with_capacity(config.network.bins.len());
     for &Bin { optional, name: bin } in config.network.bins {
         let src = version_dir.join(bin_name(bin));
-        if !src.is_file() {
-            if optional {
-                clear_active_bin(config, bin)?;
-                continue;
-            }
+        if src.is_file() {
+            get_bin_version(&src)
+                .wrap_err_with(|| format!("failed to run {bin} in version {version}"))?;
+        } else if !optional {
             bail!("binary {bin} not found in version {version} at {}", src.display());
         }
-        let v = get_bin_version(&src)
-            .wrap_err_with(|| format!("failed to run {bin} in version {version}"))?;
-        new_versions.push(v);
     }
 
     fs::create_dir_all(&config.bin_dir)?;
 
-    for (bin, v) in config.network.bins.iter().zip(new_versions) {
+    for &Bin { optional, name: bin } in config.network.bins {
         let bin_name = bin_name(bin);
         let src = version_dir.join(&bin_name);
-        let dest = config.bin_path(bin);
-
-        activate_bin(config, version, bin, &src)?;
+        if src.is_file() {
+            activate_bin(config, version, bin, &src)?;
+        } else if optional {
+            clear_active_bin(config, bin)?;
+        } else {
+            bail!("binary {bin} not found in version {version} at {}", src.display());
+        }
     }
 
     Ok(())
@@ -1320,6 +1319,12 @@ mod tests {
         for &Bin { optional, name: bin } in config.network.bins {
             let path = version_dir.join(bin_name(bin));
             assert_eq!(path.exists(), !optional, "{} existence mismatch", path.display());
+            assert_eq!(
+                extracted_dir.join(bin_name(bin)).exists(),
+                !optional,
+                "{} should remain in the extracted directory",
+                bin
+            );
         }
         assert!(!version_dir.join("solar").exists(), "stale bare solar should be removed");
         assert!(!version_dir.join("solar.exe").exists(), "stale solar.exe should be removed");
