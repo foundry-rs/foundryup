@@ -7,7 +7,7 @@ use crate::{
 };
 use eyre::{Result, WrapErr, bail};
 use fs_err as fs;
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, path::Path, time::Duration};
 
 pub(crate) async fn run(config: &Config, args: &Cli) -> Result<()> {
     config.ensure_dirs()?;
@@ -300,6 +300,11 @@ enum PrebuiltCheck {
     Download(Option<HashMap<String, String>>),
 }
 
+// Missing attestation subjects can come from temporarily stale GitHub/CDN data;
+// keep semantic retries spaced out, but cap the delay so installs fail promptly.
+const ATTESTATION_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
+const ATTESTATION_RETRY_MAX_DELAY: Duration = Duration::from_secs(4);
+
 async fn fetch_and_verify_attestation(
     config: &Config,
     repo: &str,
@@ -385,6 +390,7 @@ async fn download_attestation_hashes(
 ) -> Result<HashMap<String, String>> {
     let max_attempts = max_retries().saturating_add(1);
     let mut attempt = 1;
+    let mut retry_delay = ATTESTATION_RETRY_INITIAL_DELAY;
 
     loop {
         let artifact_json = downloader.download_to_string(artifact_url).await?;
@@ -405,11 +411,14 @@ async fn download_attestation_hashes(
 
         let next_attempt = attempt + 1;
         say!(
-            "attestation for {tag} is missing SHA-256 hashes for {}; retrying attestation download ({}/{max_attempts})",
+            "attestation for {tag} is missing SHA-256 hashes for {}; retrying attestation download in {}s ({}/{max_attempts})",
             missing.join(", "),
+            retry_delay.as_secs(),
             next_attempt
         );
+        tokio::time::sleep(retry_delay).await;
         attempt = next_attempt;
+        retry_delay = (retry_delay * 2).min(ATTESTATION_RETRY_MAX_DELAY);
     }
 }
 
