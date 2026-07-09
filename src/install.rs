@@ -772,12 +772,13 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
     }
 
     crate::process::check_bins_in_use(config)?;
-    fs::create_dir_all(&config.bin_dir)?;
 
+    // Preflight all bins before mutating: prove each one exists and runs the same
+    // semantic check activation relies on, so neither a missing nor a broken
+    // binary can leave a mix of old and new binaries active.
+    let mut new_versions = Vec::with_capacity(config.network.bins.len());
     for &Bin { optional, name: bin } in config.network.bins {
-        let bin_name = bin_name(bin);
-        let src = version_dir.join(&bin_name);
-
+        let src = version_dir.join(bin_name(bin));
         if !src.is_file() {
             if optional {
                 clear_active_bin(config, bin)?;
@@ -785,6 +786,17 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
             }
             bail!("binary {bin} not found in version {version} at {}", src.display());
         }
+        let v = get_bin_version(&src)
+            .wrap_err_with(|| format!("failed to run {bin} in version {version}"))?;
+        new_versions.push(v);
+    }
+
+    fs::create_dir_all(&config.bin_dir)?;
+
+    for (bin, v) in config.network.bins.iter().zip(new_versions) {
+        let bin_name = bin_name(bin);
+        let src = version_dir.join(&bin_name);
+        let dest = config.bin_path(bin);
 
         activate_bin(config, version, bin, &src)?;
     }
