@@ -3,6 +3,8 @@ use std::{
     process::{Command, Stdio},
 };
 
+use snapbox::{assert_data_eq, str};
+
 fn normalize_line_endings(s: &str) -> String {
     s.replace("\r\n", "\n").replace('\r', "")
 }
@@ -43,9 +45,31 @@ fn script_usage_works() {
     let output = run_script_function("usage");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("foundryup-init"), "usage should mention foundryup-init");
-    assert!(stdout.contains("--help"), "usage should mention --help");
-    assert!(stdout.contains("--version"), "usage should mention --version");
+    assert_data_eq!(
+        stdout.as_ref(),
+        str![[r#"
+foundryup-init 2.0.0
+
+The installer for foundryup
+
+Usage: foundryup-init.sh [OPTIONS]
+
+Options:
+  -v, --verbose   Enable verbose output
+  -q, --quiet     Disable progress output
+  -y, --yes       Skip confirmation prompt
+  -f, --force     Skip attestation verification (INSECURE)
+  -h, --help      Print help
+  -V, --version   Print version
+
+All other options are passed to foundryup after installation.
+
+Environment variables:
+  FOUNDRYUP_VERSION              Install a specific version of foundryup
+  FOUNDRYUP_IGNORE_VERIFICATION  Skip attestation verification if set to "true"
+
+"#]]
+    );
 }
 
 #[test]
@@ -59,7 +83,31 @@ fn script_help_flag() {
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("foundryup-init"));
+    assert_data_eq!(
+        stdout.as_ref(),
+        str![[r#"
+foundryup-init 2.0.0
+
+The installer for foundryup
+
+Usage: foundryup-init.sh [OPTIONS]
+
+Options:
+  -v, --verbose   Enable verbose output
+  -q, --quiet     Disable progress output
+  -y, --yes       Skip confirmation prompt
+  -f, --force     Skip attestation verification (INSECURE)
+  -h, --help      Print help
+  -V, --version   Print version
+
+All other options are passed to foundryup after installation.
+
+Environment variables:
+  FOUNDRYUP_VERSION              Install a specific version of foundryup
+  FOUNDRYUP_IGNORE_VERIFICATION  Skip attestation verification if set to "true"
+
+"#]]
+    );
 }
 
 #[test]
@@ -149,7 +197,7 @@ fn script_check_cmd_exists() {
     let output = run_script_function("check_cmd sh && echo 'found'");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("found"));
+    assert_data_eq!(stdout.as_ref(), "found\n");
 }
 
 #[test]
@@ -158,7 +206,7 @@ fn script_check_cmd_not_exists() {
         run_script_function("check_cmd nonexistent_cmd_12345 && echo 'found' || echo 'not'");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("not"));
+    assert_data_eq!(stdout.as_ref(), "not\n");
 }
 
 #[test]
@@ -166,7 +214,10 @@ fn script_need_cmd_fails_for_missing() {
     let output = run_script_function("need_cmd nonexistent_cmd_xyz_12345");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("need 'nonexistent_cmd_xyz_12345'"));
+    assert_data_eq!(
+        stderr.as_ref(),
+        "foundryup-init: need 'nonexistent_cmd_xyz_12345' (command not found)\n"
+    );
 }
 
 #[test]
@@ -181,7 +232,7 @@ fn script_assert_nz_success() {
         stdout,
         stderr
     );
-    assert!(stdout.contains("ok"), "stdout missing 'ok': {}", stdout);
+    assert_data_eq!(stdout.as_ref(), "ok\n");
 }
 
 #[test]
@@ -196,7 +247,7 @@ fn script_assert_nz_failure() {
         stdout,
         stderr
     );
-    assert!(stderr.contains("assert_nz test"), "stderr missing 'assert_nz test': {}", stderr);
+    assert_data_eq!(stderr.as_ref(), "foundryup-init: assert_nz test\n");
 }
 
 #[test]
@@ -204,7 +255,7 @@ fn script_say_output() {
     let output = run_script_function("say 'hello world'");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("foundryup-init: hello world"));
+    assert_data_eq!(stdout.as_ref(), "foundryup-init: hello world\n");
 }
 
 #[test]
@@ -212,7 +263,7 @@ fn script_downloader_check() {
     let output = run_script_function("downloader --check && echo 'ok'");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("ok"));
+    assert_data_eq!(stdout.as_ref(), "ok\n");
 }
 
 #[test]
@@ -220,7 +271,7 @@ fn script_ensure_success() {
     let output = run_script_function("ensure true && echo 'ok'");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("ok"));
+    assert_data_eq!(stdout.as_ref(), "ok\n");
 }
 
 #[test]
@@ -228,7 +279,7 @@ fn script_ensure_failure() {
     let output = run_script_function("ensure false");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("command failed"));
+    assert_data_eq!(stderr.as_ref(), "foundryup-init: command failed: false\n");
 }
 
 #[test]
@@ -236,7 +287,7 @@ fn script_ignore_runs_command() {
     let output = run_script_function("ignore echo 'test'");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("test"));
+    assert_data_eq!(stdout.as_ref(), "test\n");
 }
 
 #[test]
@@ -244,7 +295,7 @@ fn script_foundryup_repo_defined() {
     let output = run_script_function(r#"echo "$FOUNDRYUP_REPO""#);
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("foundry-rs/foundryup"));
+    assert_data_eq!(stdout.as_ref(), "foundry-rs/foundryup\n");
 }
 
 #[test]
@@ -260,7 +311,7 @@ echo "$FOUNDRYUP_BIN_DIR"
 "#
     ));
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("/tmp/test_home/.foundry/bin"));
+    assert_data_eq!(stdout.as_ref(), "/tmp/test_home/.foundry/bin\n");
 }
 
 #[test]
@@ -424,9 +475,14 @@ fn script_downloads_with_attestation_verification() {
     assert!(foundryup_path.exists(), "foundryup binary should be installed");
 
     let combined = format!("{stdout}{stderr}");
-    assert!(
-        combined.contains("binary verified"),
-        "attestation verification should succeed with 'binary verified ✓'. Output: {combined}"
+    assert_data_eq!(
+        combined,
+        str![[r#"
+...
+[..]foundryup-init: binary verified ✓[..]
+...
+
+"#]]
     );
 
     std::fs::remove_dir_all(&temp_dir).ok();
@@ -453,9 +509,14 @@ fn script_downloads_with_force_skips_attestation() {
     assert!(output.status.success(), "script failed:\nstdout: {stdout}\nstderr: {stderr}");
 
     let combined = format!("{stdout}{stderr}");
-    assert!(
-        combined.contains("skipping attestation verification"),
-        "--force should skip attestation. Output: {combined}"
+    assert_data_eq!(
+        combined,
+        str![[r#"
+...
+[..]foundryup-init: skipping attestation verification (--force or FOUNDRYUP_IGNORE_VERIFICATION set)[..]
+...
+
+"#]]
     );
 
     std::fs::remove_dir_all(&temp_dir).ok();
