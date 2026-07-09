@@ -9,9 +9,8 @@ use eyre::{Result, WrapErr, bail};
 use fs_err as fs;
 use itertools::Itertools;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    process::Stdio,
 };
 
 pub(crate) async fn run(config: &Config, args: &Cli) -> Result<()> {
@@ -111,24 +110,24 @@ async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> R
 
     say!("installing from {}", local_path.display());
 
-    let artifacts = build_bins_and_collect_artifacts(config, local_path, args).await?;
+    let built = build_bins(config, local_path, args).await?;
 
     for &Bin { optional, name: bin } in config.network.bins {
-        let Some(src) = build_artifact(&artifacts, bin) else {
-            if optional {
-                clear_active_bin(config, bin)?;
-                continue;
-            }
-            bail!("binary {bin} was not produced by cargo build");
-        };
+        if let Some(src) = built_bin_path(&built, bin)
+            && src.is_file()
+        {
+            let dest = config.bin_path(bin);
+            clear_active_bin(config, bin)?;
 
-        let dest = config.bin_path(bin);
-        clear_active_bin(config, bin)?;
-
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(src, &dest)?;
-        #[cfg(windows)]
-        fs::copy(src, &dest)?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(src, &dest)?;
+            #[cfg(windows)]
+            fs::copy(src, &dest)?;
+        } else if optional {
+            clear_active_bin(config, bin)?;
+        } else {
+            bail!("binary {bin} not found at {}", built.build_dir.join(bin_name(bin)).display());
+        }
     }
 
     say!("done");
@@ -204,12 +203,12 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
 
     say!("installing version {version}");
 
-    let artifacts = build_bins_and_collect_artifacts(config, &repo_path, args).await?;
+    let built = build_bins(config, &repo_path, args).await?;
 
     let version_dir = config.version_dir(repo, &version);
     fs::create_dir_all(&version_dir)?;
 
-    copy_built_bins_to_version_dir(config, &artifacts, &version_dir)?;
+    copy_built_bins_to_version_dir(config, &built, &version_dir)?;
 
     use_version(config, repo, &version)?;
 
@@ -220,20 +219,17 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
     Ok(())
 }
 
-async fn build_bins_and_collect_artifacts(
-    config: &Config,
-    repo_path: &Path,
-    args: &Cli,
-) -> Result<HashMap<String, PathBuf>> {
+#[derive(Debug)]
+struct BuiltBins {
+    build_dir: PathBuf,
+    names: HashSet<String>,
+}
+
+async fn build_bins(config: &Config, repo_path: &Path, args: &Cli) -> Result<BuiltBins> {
+    let built = cargo_build_plan(config, repo_path, args).await?;
+
     let mut cmd = tokio::process::Command::new("cargo");
-    cmd.arg("build")
-        .arg("--bins")
-        .arg("--profile")
-        .arg(&args.cargo_profile)
-        .arg("--message-format=json-render-diagnostics")
-        .current_dir(repo_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
+    cmd.arg("build").arg("--bins").arg("--profile").arg(&args.cargo_profile).current_dir(repo_path);
     cmd.env("RUSTFLAGS", rustflags());
 
     if let Some(jobs) = args.jobs {
@@ -243,83 +239,89 @@ async fn build_bins_and_collect_artifacts(
         cmd.arg("--features").arg(features);
     }
 
-    let output = cmd.output().await.wrap_err("failed to run cargo build")?;
-    emit_cargo_diagnostics(&output.stdout);
-    if !output.status.success() {
+    let status = cmd.status().await.wrap_err("failed to run cargo build")?;
+    if !status.success() {
         bail!("cargo build failed");
     }
 
-    cargo_bin_artifacts(config, &output.stdout)
+    Ok(built)
 }
 
-fn emit_cargo_diagnostics(output: &[u8]) {
-    for line in String::from_utf8_lossy(output).lines() {
-        let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if message.get("reason").and_then(serde_json::Value::as_str) != Some("compiler-message") {
-            continue;
-        }
-        if let Some(rendered) =
-            message.pointer("/message/rendered").and_then(serde_json::Value::as_str)
-        {
-            eprint!("{rendered}");
-        }
-    }
-}
+async fn cargo_build_plan(config: &Config, repo_path: &Path, args: &Cli) -> Result<BuiltBins> {
+    let mut cmd = tokio::process::Command::new("cargo");
+    cmd.args(["metadata", "--format-version", "1", "--no-deps"]).current_dir(repo_path);
 
-fn cargo_bin_artifacts(config: &Config, output: &[u8]) -> Result<HashMap<String, PathBuf>> {
-    let mut artifacts = HashMap::new();
-    for line in String::from_utf8_lossy(output).lines() {
-        let message: serde_json::Value =
-            serde_json::from_str(line).wrap_err("failed to parse cargo build output")?;
-        if message.get("reason").and_then(serde_json::Value::as_str) != Some("compiler-artifact") {
-            continue;
-        }
-        let Some(name) = message.pointer("/target/name").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        let Some(kind) = message.pointer("/target/kind").and_then(serde_json::Value::as_array)
-        else {
-            continue;
-        };
-        if !kind.iter().any(|kind| kind.as_str() == Some("bin")) {
-            continue;
-        }
-        if !config.network.bins.iter().any(|bin| bin.name == name) {
-            continue;
-        }
-        let Some(executable) = message.get("executable").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        artifacts.insert(name.to_string(), PathBuf::from(executable));
+    if let Some(ref features) = args.cargo_features {
+        cmd.arg("--features").arg(features);
     }
 
-    Ok(artifacts)
+    let output = cmd.output().await.wrap_err("failed to run cargo metadata")?;
+    if !output.status.success() {
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        bail!("cargo metadata failed");
+    }
+
+    cargo_build_plan_from_metadata(config, &args.cargo_profile, &output.stdout)
 }
 
-fn build_artifact<'a>(artifacts: &'a HashMap<String, PathBuf>, bin: &str) -> Option<&'a Path> {
-    artifacts.get(bin).filter(|path| path.is_file()).map(PathBuf::as_path)
+fn cargo_build_plan_from_metadata(
+    config: &Config,
+    profile: &str,
+    metadata: &[u8],
+) -> Result<BuiltBins> {
+    let metadata: serde_json::Value = serde_json::from_slice(metadata)?;
+    let target_dir = metadata["target_directory"]
+        .as_str()
+        .ok_or_else(|| eyre::eyre!("cargo metadata did not include target_directory"))?;
+    let build_dir = PathBuf::from(target_dir).join(profile_target_dir(profile));
+
+    let mut names = HashSet::new();
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| eyre::eyre!("cargo metadata did not include packages"))?;
+
+    for package in packages {
+        if let Some(targets) = package["targets"].as_array() {
+            for target in targets {
+                if let Some(name) = target["name"].as_str()
+                    && let Some(kind) = target["kind"].as_array()
+                    && kind.iter().any(|kind| kind.as_str() == Some("bin"))
+                    && config.network.bins.iter().any(|bin| bin.name == name)
+                {
+                    names.insert(name.to_string());
+                }
+            }
+        }
+    }
+
+    Ok(BuiltBins { build_dir, names })
+}
+
+fn profile_target_dir(profile: &str) -> &str {
+    if profile == "dev" { "debug" } else { profile }
+}
+
+fn built_bin_path(built: &BuiltBins, bin: &str) -> Option<PathBuf> {
+    built.names.contains(bin).then(|| built.build_dir.join(bin_name(bin)))
 }
 
 fn copy_built_bins_to_version_dir(
     config: &Config,
-    artifacts: &HashMap<String, PathBuf>,
+    built: &BuiltBins,
     version_dir: &Path,
 ) -> Result<()> {
     clear_version_bins(config, version_dir)?;
 
     for &Bin { optional, name: bin } in config.network.bins {
-        let Some(src) = build_artifact(artifacts, bin) else {
-            if optional {
-                continue;
-            }
-            bail!("binary {bin} was not produced by cargo build");
-        };
-
-        let dest = version_dir.join(bin_name(bin));
-        remove_if_exists(&dest)?;
-        fs::copy(src, &dest)?;
+        if let Some(src) = built_bin_path(built, bin)
+            && src.is_file()
+        {
+            let dest = version_dir.join(bin_name(bin));
+            remove_if_exists(&dest)?;
+            fs::copy(src, &dest)?;
+        } else if !optional {
+            bail!("binary {bin} not found at {}", built.build_dir.join(bin_name(bin)).display());
+        }
     }
 
     Ok(())
@@ -460,14 +462,12 @@ fn installed_bins_match_hashes(
 ) -> Result<bool> {
     for &Bin { optional, name: bin } in config.network.bins {
         let bin_name = bin_name(bin);
-        let Some(expected_hash) = expected_hash(hashes, bin, &bin_name) else {
-            if optional && !version_dir.join(&bin_name).exists() {
-                continue;
-            }
-            return Ok(false);
-        };
         let path = version_dir.join(&bin_name);
-        if !is_executable(&path) || compute_sha256(&path)? != *expected_hash {
+        if let Some(expected_hash) = expected_hash(hashes, bin, &bin_name) {
+            if !is_executable(&path) || compute_sha256(&path)? != *expected_hash {
+                return Ok(false);
+            }
+        } else if !optional || path.exists() {
             return Ok(false);
         }
     }
@@ -538,10 +538,7 @@ async fn download_and_extract(
 fn validate_extracted_binaries(config: &Config, dir: &Path) -> Result<()> {
     for &Bin { optional, name: bin } in config.network.bins {
         let path = dir.join(bin_name(bin));
-        if optional && !path.exists() {
-            continue;
-        }
-        if !is_executable(&path) {
+        if (!optional || path.exists()) && !is_executable(&path) {
             bail!("binary {bin} not found at {}", path.display());
         }
     }
@@ -556,16 +553,13 @@ fn replace_version_bins_from_dir(config: &Config, repo: &str, tag: &str, dir: &P
 
     for &Bin { optional, name: bin } in config.network.bins {
         let src = dir.join(bin_name(bin));
-        if !src.is_file() {
-            if optional {
-                continue;
-            }
+        if src.is_file() {
+            let dest = version_dir.join(bin_name(bin));
+            remove_if_exists(&dest)?;
+            fs::rename(&src, &dest)?;
+        } else if !optional {
             bail!("binary {bin} not found at {}", src.display());
         }
-
-        let dest = version_dir.join(bin_name(bin));
-        remove_if_exists(&dest)?;
-        fs::rename(&src, &dest)?;
     }
 
     Ok(())
@@ -591,29 +585,24 @@ fn verify_binaries(
     for &Bin { optional, name: bin } in config.network.bins {
         let bin_name = bin_name(bin);
         let path = version_dir.join(&bin_name);
-        let Some(expected_hash) = expected_hash(hashes, bin, &bin_name) else {
-            if optional && !path.exists() {
-                continue;
+        if let Some(expected_hash) = expected_hash(hashes, bin, &bin_name) {
+            if !is_executable(&path) {
+                say!("binary {bin} not found at {}", path.display());
+                failed = true;
+            } else {
+                let actual = compute_sha256(&path)?;
+                if actual != *expected_hash {
+                    say!("{bin} hash verification failed:");
+                    say!("  expected: {expected_hash}");
+                    say!("  actual:   {actual}");
+                    failed = true;
+                } else {
+                    say!("{bin} verified ✓");
+                }
             }
+        } else if !optional || path.exists() {
             say!("no expected hash for {bin}");
             failed = true;
-            continue;
-        };
-
-        if !is_executable(&path) {
-            say!("binary {bin} not found at {}", path.display());
-            failed = true;
-            continue;
-        }
-
-        let actual = compute_sha256(&path)?;
-        if actual != *expected_hash {
-            say!("{bin} hash verification failed:");
-            say!("  expected: {expected_hash}");
-            say!("  actual:   {actual}");
-            failed = true;
-        } else {
-            say!("{bin} verified ✓");
         }
     }
 
@@ -1071,7 +1060,7 @@ fn rustflags() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
@@ -1303,33 +1292,44 @@ mod tests {
     fn write_required_hashed_bins(version_dir: &Path, config: &Config) -> HashMap<String, String> {
         let mut hashes = HashMap::new();
         for &Bin { optional, name: bin } in config.network.bins {
-            if optional {
-                continue;
+            if !optional {
+                write_hashed_bin(version_dir, &mut hashes, bin);
             }
-            write_hashed_bin(version_dir, &mut hashes, bin);
         }
         hashes
     }
 
     #[test]
-    fn cargo_bin_artifacts_collects_configured_bin_executables() {
+    fn cargo_build_plan_collects_configured_bin_targets() {
         let tmp = tempfile::tempdir().unwrap();
         let config = test_config(tmp.path());
-        let output = br#"{"reason":"compiler-artifact","target":{"kind":["bin"],"name":"forge"},"executable":"/tmp/forge"}
-{"reason":"compiler-artifact","target":{"kind":["bin"],"name":"solar"},"executable":"/tmp/solar"}
-{"reason":"compiler-artifact","target":{"kind":["bin"],"name":"ignored"},"executable":"/tmp/ignored"}
-{"reason":"compiler-artifact","target":{"kind":["lib"],"name":"foundry"},"executable":null}"#;
+        let target_dir = tmp.path().join("target");
+        let metadata = serde_json::json!({
+            "target_directory": target_dir.display().to_string(),
+            "packages": [
+                {
+                    "targets": [
+                        { "kind": ["bin"], "name": "forge" },
+                        { "kind": ["bin"], "name": "solar" },
+                        { "kind": ["bin"], "name": "ignored" },
+                        { "kind": ["lib"], "name": "foundry" }
+                    ]
+                }
+            ]
+        })
+        .to_string();
 
-        let artifacts = cargo_bin_artifacts(&config, output).unwrap();
+        let built = cargo_build_plan_from_metadata(&config, "dev", metadata.as_bytes()).unwrap();
 
-        assert_eq!(artifacts.get("forge"), Some(&PathBuf::from("/tmp/forge")));
-        assert_eq!(artifacts.get("solar"), Some(&PathBuf::from("/tmp/solar")));
-        assert!(!artifacts.contains_key("ignored"));
-        assert!(!artifacts.contains_key("foundry"));
+        assert_eq!(built.build_dir, target_dir.join("debug"));
+        assert!(built.names.contains("forge"));
+        assert!(built.names.contains("solar"));
+        assert!(!built.names.contains("ignored"));
+        assert!(!built.names.contains("foundry"));
     }
 
     #[test]
-    fn copying_built_bins_ignores_stale_optional_target_bin() {
+    fn copying_built_bins_ignores_stale_optional_target_file() {
         let tmp = tempfile::tempdir().unwrap();
         let config = test_config(tmp.path());
         let build_dir = tmp.path().join("build");
@@ -1337,19 +1337,20 @@ mod tests {
         fs::create_dir_all(&build_dir).unwrap();
         fs::create_dir_all(&version_dir).unwrap();
 
-        let mut artifacts = HashMap::new();
+        let mut names = HashSet::new();
         for &Bin { optional, name: bin } in config.network.bins {
             if !optional {
                 let path = build_dir.join(bin_name(bin));
                 write_executable(&path, bin.as_bytes());
-                artifacts.insert(bin.to_string(), path);
+                names.insert(bin.to_string());
             }
         }
+        let built = BuiltBins { build_dir: build_dir.clone(), names };
         write_executable(&build_dir.join(bin_name("solar")), b"stale target solar");
         write_executable(&version_dir.join("solar"), b"stale solar");
         write_executable(&version_dir.join("solar.exe"), b"stale solar exe");
 
-        copy_built_bins_to_version_dir(&config, &artifacts, &version_dir).unwrap();
+        copy_built_bins_to_version_dir(&config, &built, &version_dir).unwrap();
 
         for &Bin { optional, name: bin } in config.network.bins {
             let path = version_dir.join(bin_name(bin));
