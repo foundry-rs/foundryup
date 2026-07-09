@@ -699,6 +699,15 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
         bail!("version {version} not installed for {repo}");
     }
 
+    // Preflight all bins before mutating, so a missing one can't leave a mix of
+    // old and new binaries active.
+    for bin in config.network.bins {
+        let src = version_dir.join(bin_name(bin));
+        if !src.is_file() {
+            bail!("binary {bin} not found in version {version} at {}", src.display());
+        }
+    }
+
     crate::process::check_bins_in_use(config)?;
     fs::create_dir_all(&config.bin_dir)?;
 
@@ -706,10 +715,6 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
         let bin_name = bin_name(bin);
         let src = version_dir.join(&bin_name);
         let dest = config.bin_path(bin);
-
-        if !src.is_file() {
-            bail!("binary {bin} not found in version {version} at {}", src.display());
-        }
 
         let old_version = if dest.exists() { get_bin_version(&dest).ok() } else { None };
 
