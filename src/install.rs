@@ -464,7 +464,7 @@ fn missing_attestation_bins(bins: &[&str], hashes: &HashMap<String, String>) -> 
     bins.iter()
         .filter_map(|bin| {
             let bin_name = bin_name(bin);
-            expected_hash(hashes, bin, &bin_name).is_none().then_some(bin_name)
+            expected_hash(hashes, bin, &bin_name).is_none().then(|| (*bin).to_string())
         })
         .collect()
 }
