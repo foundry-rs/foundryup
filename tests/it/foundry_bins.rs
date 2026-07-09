@@ -11,15 +11,8 @@ fn active_bin_path(foundry_dir: &Path, bin: &str) -> PathBuf {
 }
 
 fn list_output(foundry_dir: &Path) -> String {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_foundryup"))
-        .env("NO_COLOR", "1")
-        .env("FOUNDRY_DIR", foundry_dir)
-        .arg("--list")
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    String::from_utf8(output.stdout).unwrap()
+    let assert = foundryup().env("FOUNDRY_DIR", foundry_dir).arg("--list").assert().success();
+    String::from_utf8_lossy(&assert.get_output().stdout).into_owned()
 }
 
 fn assert_optional_bins(foundry_dir: &Path, stdout: &str, expected: &[&str]) {

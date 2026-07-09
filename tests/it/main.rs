@@ -119,12 +119,8 @@ foundryup [..]
 
 #[test]
 fn completions_bash() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_foundryup"))
-        .args(["--completions", "bash"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let assert = foundryup().args(["--completions", "bash"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
     assert!(stdout.contains("_foundryup"), "expected _foundryup in completions");
 }
 
@@ -458,15 +454,8 @@ fn list_includes_optional_bin_when_present() {
         write_fake_bin(&version_dir.join(format!("{bin}{EXE_SUFFIX}")));
     }
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_foundryup"))
-        .env("NO_COLOR", "1")
-        .env("FOUNDRY_DIR", &foundry_dir)
-        .arg("--list")
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let assert = foundryup().env("FOUNDRY_DIR", &foundry_dir).arg("--list").assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
     let bin_count = stdout.lines().filter(|line| line.starts_with("foundryup: - ")).count();
     assert_eq!(bin_count, BINS.len() + OPTIONAL_BINS.len());
 }
