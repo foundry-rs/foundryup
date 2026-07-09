@@ -1025,6 +1025,7 @@ fn rustflags() -> String {
 mod tests {
     use super::*;
     use base64::Engine;
+    use snapbox::{assert_data_eq, str};
 
     #[test]
     fn latest_nightly_release_tag_selects_newest_published_at() {
@@ -1061,7 +1062,10 @@ mod tests {
 
         let err = latest_nightly_release_tag(json, "foundry-rs/foundry").unwrap_err();
 
-        assert!(err.to_string().contains("could not find a nightly release tag"));
+        assert_data_eq!(
+            err.to_string(),
+            str!["could not find a nightly release tag for foundry-rs/foundry"]
+        );
     }
 
     #[test]
@@ -1238,9 +1242,10 @@ mod tests {
         ]));
 
         let err = parse_attestation_payload(&s).unwrap_err();
-        let err = err.to_string();
-        assert!(err.contains("did not contain any SHA-256 subject hashes"));
-        assert!(err.contains("forge"));
+        assert_data_eq!(
+            err.to_string(),
+            str!["attestation did not contain any SHA-256 subject hashes (subjects: forge)"]
+        );
     }
 
     #[test]
