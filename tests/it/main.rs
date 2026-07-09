@@ -375,6 +375,53 @@ fn use_version_missing_bin_leaves_previous_active() {
     }
 }
 
+// A `--use` that fails on a broken (present but non-runnable) binary must also
+// leave the previously active version fully active, not a partial switch.
+#[cfg(unix)]
+#[test]
+fn use_version_broken_bin_leaves_previous_active() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+    let good_dir = foundry_dir.join("versions/foundry-rs/foundry/v1.0.0");
+    let broken_dir = foundry_dir.join("versions/foundry-rs/foundry/v2.0.0");
+    std::fs::create_dir_all(&good_dir).unwrap();
+    std::fs::create_dir_all(&broken_dir).unwrap();
+
+    // v1.0.0 is complete; v2.0.0 has all files but `chisel` is not runnable.
+    for bin in BINS {
+        write_fake_bin(&good_dir.join(format!("{bin}{EXE_SUFFIX}")));
+    }
+    for bin in BINS.iter().filter(|b| **b != "chisel") {
+        write_fake_bin(&broken_dir.join(format!("{bin}{EXE_SUFFIX}")));
+    }
+    // A present-but-non-executable file: exists, but fails to run.
+    std::fs::write(broken_dir.join(format!("chisel{EXE_SUFFIX}")), b"not an executable").unwrap();
+
+    // Activate the good version.
+    foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["--use", "1.0.0"]).assert().success();
+
+    // Attempting to switch to the broken version fails...
+    foundryup()
+        .env("FOUNDRY_DIR", &foundry_dir)
+        .args(["--use", "2.0.0"])
+        .assert()
+        .failure()
+        .stderr_eq(str![[r#"
+...
+[..]failed to run chisel[..]
+...
+"#]]);
+
+    // ...and every active binary must still point at v1.0.0, not a mix.
+    let bin_dir = foundry_dir.join("bin");
+    for &bin in BINS {
+        let active = bin_dir.join(format!("{bin}{EXE_SUFFIX}"));
+        let target = std::fs::read_link(&active)
+            .unwrap_or_else(|e| panic!("{bin} is not an active symlink: {e}"));
+        assert_eq!(target, good_dir.join(format!("{bin}{EXE_SUFFIX}")), "{bin} was switched");
+    }
+}
+
 // On unix, `--use` activates a version by symlinking it into the bin dir.
 #[cfg(unix)]
 #[test]

@@ -699,19 +699,24 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
         bail!("version {version} not installed for {repo}");
     }
 
-    // Preflight all bins before mutating, so a missing one can't leave a mix of
-    // old and new binaries active.
+    // Preflight all bins before mutating: prove each one exists and runs the same
+    // semantic check activation relies on, so neither a missing nor a broken
+    // binary can leave a mix of old and new binaries active.
+    let mut new_versions = Vec::with_capacity(config.network.bins.len());
     for bin in config.network.bins {
         let src = version_dir.join(bin_name(bin));
         if !src.is_file() {
             bail!("binary {bin} not found in version {version} at {}", src.display());
         }
+        let v = get_bin_version(&src)
+            .wrap_err_with(|| format!("failed to run {bin} in version {version}"))?;
+        new_versions.push(v);
     }
 
     crate::process::check_bins_in_use(config)?;
     fs::create_dir_all(&config.bin_dir)?;
 
-    for bin in config.network.bins {
+    for (bin, v) in config.network.bins.iter().zip(new_versions) {
         let bin_name = bin_name(bin);
         let src = version_dir.join(&bin_name);
         let dest = config.bin_path(bin);
@@ -725,8 +730,6 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
         #[cfg(not(unix))]
         fs::copy(&src, &dest)?;
 
-        let v = get_bin_version(&dest)
-            .wrap_err_with(|| format!("failed to run {bin} after activating version {version}"))?;
         match old_version {
             Some(old) if old != v => say!("use - {v} (from {old})"),
             _ => say!("use - {v}"),
