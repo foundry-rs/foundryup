@@ -1,7 +1,7 @@
 use crate::{
     cli::Cli,
     config::Config,
-    download::{Downloader, compute_sha256, extract_tar_gz, extract_zip},
+    download::{Downloader, compute_sha256, extract_tar_gz, extract_zip, max_retries},
     platform::{Platform, Target},
     say, tell, warn,
 };
@@ -339,9 +339,7 @@ async fn fetch_and_verify_attestation(
     say!("found attestation for {tag} version, downloading attestation artifact, checking...");
 
     let artifact_url = format!("{attestation_link}/download");
-    let artifact_json = downloader.download_to_string(&artifact_url).await?;
-
-    let hashes = parse_attestation_payload(&artifact_json)?;
+    let hashes = download_attestation_hashes(downloader, &artifact_url, bins, tag).await?;
 
     let version_dir = config.version_dir(repo, tag);
 
@@ -349,7 +347,7 @@ async fn fetch_and_verify_attestation(
         let mut all_match = true;
         for bin in bins {
             let bin_name = bin_name(bin);
-            let expected = hashes.get(*bin).or_else(|| hashes.get(&bin_name));
+            let expected = expected_hash(&hashes, bin, &bin_name);
             let path = version_dir.join(&bin_name);
 
             match expected {
@@ -379,6 +377,42 @@ async fn fetch_and_verify_attestation(
     Ok(PrebuiltCheck::Download(Some(hashes)))
 }
 
+async fn download_attestation_hashes(
+    downloader: &Downloader,
+    artifact_url: &str,
+    bins: &[&str],
+    tag: &str,
+) -> Result<HashMap<String, String>> {
+    let max_attempts = max_retries().saturating_add(1);
+    let mut attempt = 1;
+
+    loop {
+        let artifact_json = downloader.download_to_string(artifact_url).await?;
+        let hashes = parse_attestation_payload(&artifact_json)?;
+        let missing = missing_attestation_bins(bins, &hashes);
+
+        if missing.is_empty() {
+            return Ok(hashes);
+        }
+
+        if attempt == max_attempts {
+            bail!(
+                "attestation for {tag} is missing SHA-256 hashes for {} after {max_attempts} attempts; available subjects: {}",
+                missing.join(", "),
+                format_hash_subjects(&hashes)
+            );
+        }
+
+        let next_attempt = attempt + 1;
+        say!(
+            "attestation for {tag} is missing SHA-256 hashes for {}; retrying attestation download ({}/{max_attempts})",
+            missing.join(", "),
+            next_attempt
+        );
+        attempt = next_attempt;
+    }
+}
+
 fn parse_attestation_payload(json: &str) -> Result<HashMap<String, String>> {
     let parsed: serde_json::Value = serde_json::from_str(json)?;
     let payload_b64 = parsed["dsseEnvelope"]["payload"]
@@ -390,9 +424,13 @@ fn parse_attestation_payload(json: &str) -> Result<HashMap<String, String>> {
     let payload_json: serde_json::Value = serde_json::from_slice(&payload_bytes)?;
 
     let mut hashes = HashMap::new();
+    let mut subjects = Vec::new();
 
     if let Some(subject) = payload_json["subject"].as_array() {
         for entry in subject {
+            if let Some(name) = entry["name"].as_str() {
+                subjects.push(name.to_string());
+            }
             if let (Some(name), Some(digest)) =
                 (entry["name"].as_str(), entry["digest"]["sha256"].as_str())
             {
@@ -401,7 +439,55 @@ fn parse_attestation_payload(json: &str) -> Result<HashMap<String, String>> {
         }
     }
 
+    if hashes.is_empty() {
+        bail!(
+            "attestation did not contain any SHA-256 subject hashes (subjects: {})",
+            format_subjects(&subjects)
+        );
+    }
+
     Ok(hashes)
+}
+
+fn expected_hash<'a>(
+    hashes: &'a HashMap<String, String>,
+    bin: &str,
+    bin_name: &str,
+) -> Option<&'a String> {
+    hashes.get(bin).or_else(|| hashes.get(bin_name)).or_else(|| {
+        hashes.iter().find_map(|(subject, hash)| {
+            let basename = attestation_subject_basename(subject);
+            (basename == bin || basename == bin_name).then_some(hash)
+        })
+    })
+}
+
+fn missing_attestation_bins(bins: &[&str], hashes: &HashMap<String, String>) -> Vec<String> {
+    bins.iter()
+        .filter_map(|bin| {
+            let bin_name = bin_name(bin);
+            expected_hash(hashes, bin, &bin_name).is_none().then_some(bin_name)
+        })
+        .collect()
+}
+
+fn attestation_subject_basename(subject: &str) -> &str {
+    subject.rsplit(['/', '\\']).find(|part| !part.is_empty()).unwrap_or(subject)
+}
+
+fn format_hash_subjects(hashes: &HashMap<String, String>) -> String {
+    format_subjects(hashes.keys())
+}
+
+fn format_subjects<I, S>(subjects: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut subjects = subjects.into_iter().map(|s| s.as_ref().to_string()).collect::<Vec<_>>();
+    subjects.sort();
+    subjects.dedup();
+    if subjects.is_empty() { "none".to_string() } else { subjects.join(", ") }
 }
 
 async fn download_and_extract(
@@ -463,15 +549,16 @@ fn verify_installed_binaries(
 
     let version_dir = config.version_dir(repo, tag);
     let mut failed = false;
+    let mut missing = Vec::new();
 
     for bin in config.network.bins {
         let bin_name = bin_name(bin);
-        let expected = hashes.get(*bin).or_else(|| hashes.get(&bin_name));
+        let expected = expected_hash(hashes, bin, &bin_name);
         let path = version_dir.join(&bin_name);
 
         match expected {
             None => {
-                say!("no expected hash for {bin}");
+                missing.push(bin_name);
                 failed = true;
             }
             Some(expected_hash) => {
@@ -492,6 +579,11 @@ fn verify_installed_binaries(
                 }
             }
         }
+    }
+
+    if !missing.is_empty() {
+        say!("attestation did not include expected hashes for: {}", missing.join(", "));
+        say!("attestation subjects: {}", format_hash_subjects(hashes));
     }
 
     if failed {
@@ -934,6 +1026,7 @@ fn rustflags() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
 
     #[test]
     fn latest_nightly_release_tag_selects_newest_published_at() {
@@ -1132,6 +1225,52 @@ mod tests {
 
         let hashes = parse_attestation_payload(s).unwrap();
         assert!(!hashes.is_empty());
+        assert!(hashes.contains_key("forge"));
+    }
+
+    #[test]
+    fn attestation_errors_when_no_sha256_subjects() {
+        let s = attestation_json(serde_json::json!([
+            {
+                "name": "forge",
+                "digest": {
+                    "sha512": "abc"
+                }
+            }
+        ]));
+
+        let err = parse_attestation_payload(&s).unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("did not contain any SHA-256 subject hashes"));
+        assert!(err.contains("forge"));
+    }
+
+    #[test]
+    fn attestation_bin_lookup_accepts_path_subjects() {
+        let hashes = HashMap::from([(
+            "target/x86_64-unknown-linux-gnu/release/forge".to_string(),
+            "abc".to_string(),
+        )]);
+
+        assert_eq!(expected_hash(&hashes, "forge", "forge").unwrap(), "abc");
+        assert!(missing_attestation_bins(&["forge"], &hashes).is_empty());
+    }
+
+    #[test]
+    fn attestation_missing_bins_lists_expected_binary_names() {
+        let hashes =
+            HashMap::from([("foundry_v1.7.1_linux_amd64.tar.gz".to_string(), "abc".to_string())]);
+
+        let missing = missing_attestation_bins(&["forge", "cast"], &hashes);
+
+        assert_eq!(missing, ["forge", "cast"]);
+        assert_eq!(format_hash_subjects(&hashes), "foundry_v1.7.1_linux_amd64.tar.gz");
+    }
+
+    fn attestation_json(subjects: serde_json::Value) -> String {
+        let payload = serde_json::json!({ "subject": subjects }).to_string();
+        let payload = base64::engine::general_purpose::STANDARD.encode(payload);
+        serde_json::json!({ "dsseEnvelope": { "payload": payload } }).to_string()
     }
 
     fn test_config(foundry_dir: &Path) -> Config {
