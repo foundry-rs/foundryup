@@ -48,7 +48,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     "gzip",
     "stream",
 ] }
-tokio = { version = "1", features = ["rt-multi-thread", "fs", "process", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "process", "io-util", "time"] }
 futures-util = "0.3"
 
 # cli

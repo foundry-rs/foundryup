@@ -1,4 +1,4 @@
-use snapbox::{cmd::Command, str};
+use snapbox::{assert_data_eq, cmd::Command, str};
 use std::env::consts::EXE_SUFFIX;
 
 const BINS: &[&str] = &["forge", "cast", "anvil", "chisel"];
@@ -127,7 +127,15 @@ foundryup [..]
 fn completions_bash() {
     let assert = foundryup().args(["--completions", "bash"]).assert().success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
-    assert!(stdout.contains("_foundryup"), "expected _foundryup in completions");
+    assert_data_eq!(
+        stdout.as_ref(),
+        str![[r#"
+...
+_foundryup()[..]
+...
+
+"#]]
+    );
 }
 
 #[test]

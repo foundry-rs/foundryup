@@ -16,11 +16,14 @@ const DEFAULT_MAX_RETRIES: u32 = 5;
 /// The script's `FOUNDRYUP_RETRY_DELAY` / `FOUNDRYUP_RETRY_MAX_TIME` are not
 /// supported here: reqwest's retry layer manages its own backoff and does not
 /// expose delay or total-time knobs.
-fn max_retries() -> u32 {
-    std::env::var("FOUNDRYUP_MAX_RETRIES")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(DEFAULT_MAX_RETRIES)
+pub(crate) fn max_retries() -> u32 {
+    static CACHE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| {
+        std::env::var("FOUNDRYUP_MAX_RETRIES")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(DEFAULT_MAX_RETRIES)
+    })
 }
 
 /// Transient HTTP statuses that may recover on retry (e.g. GitHub rate limiting
