@@ -22,7 +22,8 @@ pub(crate) fn check_bins_in_use(config: &Config) -> Result<()> {
         })
         .map(Process::name);
 
-    if let Some(bin) = detect_in_use(config.network.bins, names) {
+    let bins = config.network.bins.iter().map(|bin| bin.name).collect::<Vec<_>>();
+    if let Some(bin) = detect_in_use(&bins, names) {
         bail!("'{bin}' is currently running. Please stop the process and try again.");
     }
 
@@ -59,7 +60,7 @@ fn matches_bin(name: &OsStr, bin: &str) -> bool {
 mod tests {
     use super::*;
 
-    const BINS: &[&str] = &["forge", "cast", "anvil", "chisel"];
+    const BINS: &[&str] = &["forge", "cast", "anvil", "chisel", "solar"];
 
     fn detect(names: &[&str]) -> Option<&'static str> {
         detect_in_use(BINS, names.iter().map(|n| OsStr::new(*n)))
