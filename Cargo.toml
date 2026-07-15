@@ -66,6 +66,7 @@ hex = "0.4"
 home = "0.5"
 indicatif = "0.18"
 itertools = "0.15"
+quick-xml = "0.38"
 semver = "1"
 serde_json = "1"
 digest-io = "0.1"
@@ -74,6 +75,7 @@ sysinfo = "0.36"
 tar = "0.4"
 tempfile = "3"
 self-replace = "1"
+time = { version = "0.3", features = ["parsing"] }
 which = "8"
 zip = { version = "7", default-features = false, features = ["deflate"] }
 
