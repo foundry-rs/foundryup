@@ -8,11 +8,13 @@ use crate::{
 use eyre::{Result, WrapErr, bail};
 use fs_err as fs;
 use itertools::Itertools;
+use quick_xml::{Reader, events::Event, name::QName};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     time::Duration,
 };
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 pub(crate) async fn run(config: &Config, args: &Cli) -> Result<()> {
     config.ensure_dirs()?;
@@ -1033,14 +1035,147 @@ pub(crate) fn tag_from_release_url(url: &str) -> Option<String> {
     valid.then(|| tag.to_string())
 }
 
-/// Fetches the newest nightly release tag for `repo` via the GitHub API.
+/// Fetches the newest nightly release tag for `repo`.
+///
+/// Prefers GitHub's public releases Atom feed, which is not subject to the
+/// unauthenticated REST API rate limit, and falls back to the API when the feed
+/// cannot be fetched or parsed.
 async fn fetch_latest_nightly_release_tag(downloader: &Downloader, repo: &str) -> Result<String> {
+    if let Some(tag) = fetch_latest_nightly_release_tag_via_feed(downloader, repo).await {
+        return Ok(tag);
+    }
+
     let url = format!("https://api.github.com/repos/{repo}/releases");
     let body = downloader
         .download_to_string(&url)
         .await
         .wrap_err("failed to fetch release tags from GitHub API")?;
     latest_nightly_release_tag(&body, repo)
+}
+
+async fn fetch_latest_nightly_release_tag_via_feed(
+    downloader: &Downloader,
+    repo: &str,
+) -> Option<String> {
+    let url = format!("https://github.com/{repo}/releases.atom");
+    let body = downloader.download_to_string(&url).await.ok()?;
+    latest_nightly_release_tag_from_feed(&body, repo)
+}
+
+fn latest_nightly_release_tag_from_feed(feed: &str, repo: &str) -> Option<String> {
+    let mut reader = Reader::from_str(feed);
+    reader.config_mut().trim_text(true);
+
+    let mut in_feed = false;
+    let mut feed_closed = false;
+    let mut in_entry = false;
+    let mut updated = None;
+    let mut tag = None;
+    let mut candidates = Vec::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(event)) if !in_feed => {
+                if feed_closed || event.name() != QName(b"feed") {
+                    return None;
+                }
+                in_feed = true;
+            }
+            Ok(Event::Empty(_)) if !in_feed => return None,
+            Ok(Event::Start(event)) if event.name() == QName(b"feed") => return None,
+            Ok(Event::Start(event)) if in_feed && event.name() == QName(b"entry") => {
+                in_entry = true;
+                updated = None;
+                tag = None;
+            }
+            Ok(Event::Start(event)) if in_entry && event.name() == QName(b"updated") => {
+                updated = reader
+                    .read_text(QName(b"updated"))
+                    .ok()
+                    .and_then(|value| OffsetDateTime::parse(&value, &Rfc3339).ok());
+            }
+            Ok(Event::Empty(event)) | Ok(Event::Start(event))
+                if in_entry && event.name() == QName(b"link") =>
+            {
+                let mut is_alternate = false;
+                let mut href = None;
+                for attribute in event.attributes() {
+                    let attribute = attribute.ok()?;
+                    if attribute.key == QName(b"rel") {
+                        is_alternate = attribute
+                            .decode_and_unescape_value(reader.decoder())
+                            .ok()
+                            .is_some_and(|value| value == "alternate");
+                    } else if attribute.key == QName(b"href") {
+                        href = attribute
+                            .decode_and_unescape_value(reader.decoder())
+                            .ok()
+                            .map(|value| value.into_owned());
+                    }
+                }
+                if is_alternate {
+                    if let Some(candidate) =
+                        href.and_then(|href| nightly_tag_from_release_url(&href, repo))
+                    {
+                        tag = Some(candidate);
+                    }
+                }
+            }
+            Ok(Event::End(event)) if event.name() == QName(b"entry") => {
+                if let (Some(updated), Some(tag)) = (updated.take(), tag.take()) {
+                    candidates.push((updated, tag));
+                }
+                in_entry = false;
+            }
+            Ok(Event::End(event)) if event.name() == QName(b"feed") => {
+                in_feed = false;
+                feed_closed = true;
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => return None,
+            _ => {}
+        }
+    }
+
+    if !feed_closed {
+        return None;
+    }
+    candidates.into_iter().max_by_key(|(updated, _)| *updated).map(|(_, tag)| tag)
+}
+
+fn nightly_tag_from_release_url(url: &str, repo: &str) -> Option<String> {
+    let url = reqwest::Url::parse(url).ok()?;
+    if url.scheme() != "https"
+        || !url.host_str().is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
+        || url.port_or_known_default() != Some(443)
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+
+    let (expected_owner, expected_repo) = repo.split_once('/')?;
+    if expected_owner.is_empty() || expected_repo.is_empty() || expected_repo.contains('/') {
+        return None;
+    }
+    let mut segments = url.path_segments()?;
+    let owner = segments.next()?;
+    let repo = segments.next()?;
+    if !owner.eq_ignore_ascii_case(expected_owner)
+        || !repo.eq_ignore_ascii_case(expected_repo)
+        || segments.next()? != "releases"
+        || segments.next()? != "tag"
+    {
+        return None;
+    }
+    let tag = segments.next()?;
+    if segments.next().is_some() {
+        return None;
+    }
+    let sha = tag.strip_prefix("nightly-")?;
+    (sha.len() == 40
+        && sha.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then(|| tag.to_string())
 }
 
 fn latest_nightly_release_tag(json: &str, repo: &str) -> Result<String> {
@@ -1147,6 +1282,159 @@ mod tests {
     use snapbox::{assert_data_eq, str};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn latest_nightly_release_tag_from_github_feed_fixture() {
+        let feed = include_str!("../tests/fixtures/github-releases.atom");
+
+        assert_eq!(
+            latest_nightly_release_tag_from_feed(feed, "foundry-rs/foundry"),
+            Some("nightly-3333333333333333333333333333333333333333".to_string())
+        );
+    }
+
+    #[test]
+    fn latest_nightly_release_tag_from_feed_selects_newest_updated_entry() {
+        let old = "nightly-1111111111111111111111111111111111111111";
+        let new = "nightly-2222222222222222222222222222222222222222";
+        let middle = "nightly-3333333333333333333333333333333333333333";
+        let feed = format!(
+            r#"<feed>
+                <entry>
+                    <updated>2026-05-01T00:00:00Z</updated>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/{old}"/>
+                </entry>
+                <entry>
+                    <updated>2026-05-03T00:00:00Z</updated>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/{new}"/>
+                </entry>
+                <entry>
+                    <updated>2026-05-02T00:00:00Z</updated>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/{middle}"/>
+                </entry>
+            </feed>"#
+        );
+
+        assert_eq!(
+            latest_nightly_release_tag_from_feed(&feed, "foundry-rs/foundry"),
+            Some(new.to_string())
+        );
+    }
+
+    #[test]
+    fn latest_nightly_release_tag_from_feed_only_uses_entry_release_links() {
+        let stable_mention = "nightly-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let nightly = "nightly-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let feed = format!(
+            r#"<feed>
+                <entry>
+                    <updated>2026-05-03T00:00:00Z</updated>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/v1.0.0"/>
+                    <content>Compare {stable_mention} with another release.</content>
+                </entry>
+                <entry>
+                    <updated>2026-05-02T00:00:00Z</updated>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/{nightly}"/>
+                </entry>
+            </feed>"#
+        );
+
+        assert_eq!(
+            latest_nightly_release_tag_from_feed(&feed, "foundry-rs/foundry"),
+            Some(nightly.to_string())
+        );
+    }
+
+    #[test]
+    fn latest_nightly_release_tag_from_feed_rejects_invalid_entries() {
+        let invalid_feeds = [
+            r#"<feed><entry><updated>2026-05-01T00:00:00Z</updated><link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/nightly-short"/></entry></feed>"#,
+            r#"<feed><entry><updated>2026-05-01T00:00:00Z</updated><link rel="alternate" href="https://example.com/foundry-rs/foundry/releases/tag/nightly-1111111111111111111111111111111111111111"/></entry></feed>"#,
+            r#"<feed><entry><link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/nightly-1111111111111111111111111111111111111111"/></entry></feed>"#,
+            r#"<feed><entry><updated>2026-05-01T00:00:00Z</updated>"#,
+            r#"<feed><entry><updated>2026-05-01T00:00:00Z</updated><link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/nightly-1111111111111111111111111111111111111111"/></entry>"#,
+            r#"<entry><updated>2026-05-01T00:00:00Z</updated><link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/nightly-1111111111111111111111111111111111111111"/></entry>"#,
+        ];
+
+        for feed in invalid_feeds {
+            assert_eq!(latest_nightly_release_tag_from_feed(feed, "foundry-rs/foundry"), None);
+        }
+    }
+
+    #[test]
+    fn latest_nightly_release_tag_from_feed_ignores_invalid_updated_values() {
+        let valid = "nightly-1111111111111111111111111111111111111111";
+        let invalid = "nightly-2222222222222222222222222222222222222222";
+        let feed = format!(
+            r#"<feed>
+                <entry>
+                    <updated>2026-05-01T00:00:00Z</updated>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/{valid}"/>
+                </entry>
+                <entry>
+                    <updated>not-a-timestamp</updated>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/{invalid}"/>
+                </entry>
+            </feed>"#
+        );
+
+        assert_eq!(
+            latest_nightly_release_tag_from_feed(&feed, "foundry-rs/foundry"),
+            Some(valid.to_string())
+        );
+    }
+
+    #[test]
+    fn latest_nightly_release_tag_from_feed_supports_rfc3339_timestamps() {
+        let older = "nightly-1111111111111111111111111111111111111111";
+        let newer = "nightly-2222222222222222222222222222222222222222";
+        let feed = format!(
+            r#"<feed>
+                <entry>
+                    <updated>2026-05-03T01:00:00+02:00</updated>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/{older}"/>
+                </entry>
+                <entry>
+                    <updated>2026-05-03T00:30:00.500Z</updated>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/{newer}"/>
+                </entry>
+            </feed>"#
+        );
+
+        assert_eq!(
+            latest_nightly_release_tag_from_feed(&feed, "foundry-rs/foundry"),
+            Some(newer.to_string())
+        );
+    }
+
+    #[test]
+    fn latest_nightly_release_tag_from_feed_matches_repo_case_insensitively() {
+        let feed = include_str!("../tests/fixtures/github-releases.atom");
+
+        assert_eq!(
+            latest_nightly_release_tag_from_feed(feed, "FOUNDRY-RS/FOUNDRY"),
+            Some("nightly-3333333333333333333333333333333333333333".to_string())
+        );
+    }
+
+    #[test]
+    fn latest_nightly_release_tag_from_feed_keeps_valid_alternate_link() {
+        let nightly = "nightly-1111111111111111111111111111111111111111";
+        let feed = format!(
+            r#"<feed>
+                <entry>
+                    <updated>2026-05-01T00:00:00Z</updated>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/{nightly}"/>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases"/>
+                </entry>
+            </feed>"#
+        );
+
+        assert_eq!(
+            latest_nightly_release_tag_from_feed(&feed, "foundry-rs/foundry"),
+            Some(nightly.to_string())
+        );
+    }
 
     #[test]
     fn latest_nightly_release_tag_selects_newest_published_at() {
