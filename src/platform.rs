@@ -19,7 +19,7 @@ impl Platform {
         } else if cfg!(target_os = "windows") {
             Ok(Self::Win32)
         } else {
-            bail!("unsupported platform: {}", std::env::consts::OS)
+            bail!("unsupported platform: {}", std::env::consts::OS);
         }
     }
 
@@ -30,7 +30,9 @@ impl Platform {
             "darwin" => Ok(Self::Darwin),
             s if s.starts_with("mac") => Ok(Self::Darwin),
             s if s.starts_with("mingw") || s.starts_with("win") => Ok(Self::Win32),
-            _ => bail!("unsupported platform: {s}"),
+            _ => {
+                bail!("unsupported platform: {s}");
+            }
         }
     }
 

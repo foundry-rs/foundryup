@@ -489,10 +489,12 @@ fn expected_hash<'a>(
     match matching_subjects.as_slice() {
         [] => Ok(None),
         [(_, hash)] => Ok(Some(*hash)),
-        _ => bail!(
-            "attestation has ambiguous SHA-256 hash subjects for {bin}: {}",
-            format_subjects(matching_subjects.iter().map(|(subject, _)| subject.as_str()))
-        ),
+        _ => {
+            bail!(
+                "attestation has ambiguous SHA-256 hash subjects for {bin}: {}",
+                format_subjects(matching_subjects.iter().map(|(subject, _)| subject.as_str()))
+            );
+        }
     }
 }
 
@@ -856,7 +858,7 @@ fn find_unique_repo_for_version(config: &Config, version: &str) -> Result<Option
             bail!(
                 "version {version} is installed for multiple repos ({}); specify --repo to disambiguate",
                 matches.join(", ")
-            )
+            );
         }
     }
 }
@@ -1004,7 +1006,9 @@ async fn fetch_latest_release_tag(downloader: &Downloader, repo: &str) -> Result
     let tag = json["tag_name"].as_str().filter(|s| !s.is_empty());
     match tag {
         Some(tag) => Ok(tag.to_string()),
-        None => bail!("could not find a latest release tag for {repo}"),
+        None => {
+            bail!("could not find a latest release tag for {repo}");
+        }
     }
 }
 
