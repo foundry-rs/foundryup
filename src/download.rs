@@ -50,9 +50,14 @@ impl PartialEq<&str> for GitHubHosts {
 /// `api.github.com` requests so they use the higher authenticated rate limit.
 /// Checks `GITHUB_TOKEN` then `GH_TOKEN`; empty values are ignored.
 fn github_token() -> Option<String> {
-    ["GITHUB_TOKEN", "GH_TOKEN"]
-        .into_iter()
-        .find_map(|var| std::env::var(var).ok().filter(|t| !t.is_empty()))
+    static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            ["GITHUB_TOKEN", "GH_TOKEN"]
+                .into_iter()
+                .find_map(|var| std::env::var(var).ok().filter(|t| !t.is_empty()))
+        })
+        .clone()
 }
 
 /// Whether `url` points at the GitHub REST API over HTTPS, used to gate token
