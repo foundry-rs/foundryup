@@ -8,7 +8,7 @@ use crate::{
 use eyre::{Result, WrapErr, bail};
 use fs_err as fs;
 use itertools::Itertools;
-use quick_xml::{Reader, events::Event, name::QName};
+use quick_xml::{Reader, XmlVersion, events::Event, name::QName};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -489,10 +489,12 @@ fn expected_hash<'a>(
     match matching_subjects.as_slice() {
         [] => Ok(None),
         [(_, hash)] => Ok(Some(*hash)),
-        _ => bail!(
-            "attestation has ambiguous SHA-256 hash subjects for {bin}: {}",
-            format_subjects(matching_subjects.iter().map(|(subject, _)| subject.as_str()))
-        ),
+        _ => {
+            bail!(
+                "attestation has ambiguous SHA-256 hash subjects for {bin}: {}",
+                format_subjects(matching_subjects.iter().map(|(subject, _)| subject.as_str()))
+            );
+        }
     }
 }
 
@@ -856,7 +858,7 @@ fn find_unique_repo_for_version(config: &Config, version: &str) -> Result<Option
             bail!(
                 "version {version} is installed for multiple repos ({}); specify --repo to disambiguate",
                 matches.join(", ")
-            )
+            );
         }
     }
 }
@@ -1004,7 +1006,9 @@ async fn fetch_latest_release_tag(downloader: &Downloader, repo: &str) -> Result
     let tag = json["tag_name"].as_str().filter(|s| !s.is_empty());
     match tag {
         Some(tag) => Ok(tag.to_string()),
-        None => bail!("could not find a latest release tag for {repo}"),
+        None => {
+            bail!("could not find a latest release tag for {repo}");
+        }
     }
 }
 
@@ -1092,6 +1096,7 @@ fn latest_nightly_release_tag_from_feed(feed: &str, repo: &str) -> Option<String
                 updated = reader
                     .read_text(QName(b"updated"))
                     .ok()
+                    .and_then(|value| value.decode().ok())
                     .and_then(|value| OffsetDateTime::parse(&value, &Rfc3339).ok());
             }
             Ok(Event::Empty(event)) | Ok(Event::Start(event))
@@ -1103,12 +1108,12 @@ fn latest_nightly_release_tag_from_feed(feed: &str, repo: &str) -> Option<String
                     let attribute = attribute.ok()?;
                     if attribute.key == QName(b"rel") {
                         is_alternate = attribute
-                            .decode_and_unescape_value(reader.decoder())
+                            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
                             .ok()
                             .is_some_and(|value| value == "alternate");
                     } else if attribute.key == QName(b"href") {
                         href = attribute
-                            .decode_and_unescape_value(reader.decoder())
+                            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
                             .ok()
                             .map(|value| value.into_owned());
                     }
