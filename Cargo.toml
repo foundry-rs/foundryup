@@ -59,7 +59,7 @@ clap_complete = "4"
 eyre = "0.6"
 
 # misc
-base64 = "0.22"
+base64 = "0.23"
 flate2 = "1"
 fs-err = "3"
 hex = "0.4"
