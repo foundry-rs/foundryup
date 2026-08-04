@@ -134,7 +134,9 @@ impl Downloader {
     pub(crate) async fn download_to_file(&self, url: &str, path: &Path) -> Result<()> {
         match self.download_to_file_optional(url, path).await? {
             FileDownload::Downloaded => Ok(()),
-            FileDownload::NotFound => bail!("failed to download {url}: HTTP 404 Not Found"),
+            FileDownload::NotFound => {
+                bail!("failed to download {url}: HTTP 404 Not Found");
+            }
         }
     }
 

@@ -204,7 +204,7 @@ where
         target.platform.as_str(),
         target.arch.as_str(),
         attempted.join(", ")
-    )
+    );
 }
 
 async fn finish_prebuilt_install(
