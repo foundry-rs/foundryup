@@ -1,7 +1,9 @@
 use crate::{
     cli::Cli,
     config::{Bin, Config},
-    download::{Downloader, compute_sha256, extract_tar_gz, extract_zip, max_retries},
+    download::{
+        Downloader, FileDownload, compute_sha256, extract_tar_gz, extract_zip, max_retries,
+    },
     platform::{Platform, Target},
     say, tell, warn,
 };
@@ -10,11 +12,14 @@ use fs_err as fs;
 use itertools::Itertools;
 use quick_xml::{Reader, XmlVersion, events::Event, name::QName};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    future::Future,
     path::{Path, PathBuf},
     time::Duration,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+
+const NIGHTLY_CANDIDATE_LIMIT: usize = 5;
 
 pub(crate) async fn run(config: &Config, args: &Cli) -> Result<()> {
     config.ensure_dirs()?;
@@ -37,34 +42,40 @@ pub(crate) async fn run(config: &Config, args: &Cli) -> Result<()> {
 
 async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
     let repo = config.network.repo;
-
     let downloader = Downloader::new()?;
+    let requested = args.version.as_deref().unwrap_or(config.network.default_version);
 
-    let (version, tag) = resolve_version_and_tag(
-        &downloader,
-        repo,
-        args.version.as_deref().unwrap_or(config.network.default_version),
-    )
-    .await?;
+    if requested == "nightly" {
+        let target = Target::detect(args.platform.as_deref(), args.arch.as_deref())?;
+        say!("fetching latest nightly release tags from {repo}...");
+        let candidates = fetch_latest_nightly_release_tags(&downloader, repo).await?;
+        let archive_name = archive_name(config, "nightly", &target);
+        return try_nightly_candidates(candidates, &target, &archive_name, |tag| {
+            install_moving_nightly_candidate(config, args, &downloader, &target, tag)
+        })
+        .await;
+    }
 
-    say!("installing {} (version {version}, tag {tag})", config.network.display_name);
-
+    let (version, tag) = resolve_version_and_tag(&downloader, repo, requested).await?;
     let target = Target::detect(args.platform.as_deref(), args.arch.as_deref())?;
+    install_exact_prebuilt(config, args, &downloader, &target, &version, &tag).await
+}
 
-    let release_url =
-        format!("https://github.com/{}/releases/download/{tag}/", config.network.repo);
+async fn install_exact_prebuilt(
+    config: &Config,
+    args: &Cli,
+    downloader: &Downloader,
+    target: &Target,
+    version: &str,
+    tag: &str,
+) -> Result<()> {
+    let repo = config.network.repo;
+    say!("installing {} (version {version}, tag {tag})", config.network.display_name);
+    let release_url = release_url(repo, tag);
 
     let check = if config.network.has_attestation && !args.force {
-        fetch_and_verify_attestation(
-            config,
-            repo,
-            &downloader,
-            &release_url,
-            &version,
-            &tag,
-            &target,
-        )
-        .await?
+        fetch_and_verify_attestation(config, repo, downloader, &release_url, version, tag, target)
+            .await?
     } else {
         if args.force {
             say!("skipped SHA verification due to --force flag");
@@ -72,27 +83,151 @@ async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
         PrebuiltCheck::Download(None)
     };
 
-    // A verified cache hit is already activated; return so `main` can still
-    // print the foundryup self-update check instead of exiting the process here.
     let hashes = match check {
         PrebuiltCheck::AlreadyActivated => return Ok(()),
         PrebuiltCheck::Download(hashes) => hashes,
     };
 
-    let extracted =
-        download_and_extract(config, &downloader, &release_url, &version, &target).await?;
+    let extracted = download_and_extract(config, downloader, &release_url, version, target).await?;
+    finish_prebuilt_install(config, downloader, version, tag, extracted, hashes).await
+}
 
+async fn install_moving_nightly_candidate(
+    config: &Config,
+    args: &Cli,
+    downloader: &Downloader,
+    target: &Target,
+    tag: String,
+) -> Result<bool> {
+    let repo = config.network.repo;
+    let version = "nightly";
+    let release_url = release_url(repo, &tag);
+
+    // Preserve verified cache activation without downloading the archive again.
+    // Uncached candidates check the archive first so an unpublished nightly's
+    // missing attestation cannot mask the archive 404 that permits fallback.
+    let version_dir = config.version_dir(repo, &tag);
+    if version_dir.exists() && config.network.has_attestation && !args.force {
+        let check = fetch_and_verify_attestation(
+            config,
+            repo,
+            downloader,
+            &release_url,
+            version,
+            &tag,
+            target,
+        )
+        .await?;
+        if matches!(check, PrebuiltCheck::AlreadyActivated) {
+            return Ok(true);
+        }
+        let PrebuiltCheck::Download(hashes) = check else { unreachable!() };
+        let Some(extracted) =
+            download_and_extract_optional(config, downloader, &release_url, version, target)
+                .await?
+        else {
+            return Ok(false);
+        };
+        say!("installing {} (version {version}, tag {tag})", config.network.display_name);
+        finish_prebuilt_install(config, downloader, version, &tag, extracted, hashes).await?;
+        return Ok(true);
+    }
+
+    let Some(extracted) =
+        download_and_extract_optional(config, downloader, &release_url, version, target).await?
+    else {
+        return Ok(false);
+    };
+
+    let hashes = if config.network.has_attestation && !args.force {
+        match fetch_and_verify_attestation(
+            config,
+            repo,
+            downloader,
+            &release_url,
+            version,
+            &tag,
+            target,
+        )
+        .await?
+        {
+            PrebuiltCheck::AlreadyActivated => return Ok(true),
+            PrebuiltCheck::Download(hashes) => hashes,
+        }
+    } else {
+        if args.force {
+            say!("skipped SHA verification due to --force flag");
+        }
+        None
+    };
+
+    say!("installing {} (version {version}, tag {tag})", config.network.display_name);
+    finish_prebuilt_install(config, downloader, version, &tag, extracted, hashes).await?;
+    Ok(true)
+}
+
+async fn try_nightly_candidates<F, Fut>(
+    candidates: Vec<String>,
+    target: &Target,
+    archive_name: &str,
+    mut attempt: F,
+) -> Result<()>
+where
+    F: FnMut(String) -> Fut,
+    Fut: Future<Output = Result<bool>>,
+{
+    let mut attempted = Vec::new();
+    let mut candidates = candidates.into_iter().peekable();
+    while let Some(tag) = candidates.next() {
+        attempted.push(tag.clone());
+        if attempt(tag.clone()).await? {
+            say!("selected nightly release tag: {tag}");
+            return Ok(());
+        }
+        if candidates.peek().is_some() {
+            warn!(
+                "nightly release tag {tag} has no {archive_name} for {}/{}; trying an older nightly",
+                target.platform.as_str(),
+                target.arch.as_str()
+            );
+        } else {
+            warn!(
+                "nightly release tag {tag} has no {archive_name} for {}/{}",
+                target.platform.as_str(),
+                target.arch.as_str()
+            );
+        }
+    }
+
+    bail!(
+        "could not find an installable nightly release for {}/{}; {archive_name} was not found for: {}",
+        target.platform.as_str(),
+        target.arch.as_str(),
+        attempted.join(", ")
+    )
+}
+
+async fn finish_prebuilt_install(
+    config: &Config,
+    downloader: &Downloader,
+    version: &str,
+    tag: &str,
+    extracted: ExtractedArchive,
+    hashes: Option<HashMap<String, String>>,
+) -> Result<()> {
     if let Some(ref hashes) = hashes {
         verify_binaries(config, &extracted.path, hashes)?;
     } else {
         validate_extracted_binaries(config, &extracted.path)?;
     }
 
-    replace_version_bins_from_dir(config, repo, &tag, &extracted.path)?;
+    let repo = config.network.repo;
+    replace_version_bins_from_dir(config, repo, tag, &extracted.path)?;
 
-    download_manpages(config, &downloader, &release_url, &version).await;
+    let release_url = release_url(repo, tag);
+    download_manpages(config, downloader, &release_url, version).await;
 
-    use_version(config, repo, &tag)?;
+    use_version(config, repo, tag)?;
     say!("done!");
 
     Ok(())
@@ -554,6 +689,20 @@ struct ExtractedArchive {
     path: PathBuf,
 }
 
+fn release_url(repo: &str, tag: &str) -> String {
+    format!("https://github.com/{repo}/releases/download/{tag}/")
+}
+
+fn archive_name(config: &Config, version: &str, target: &Target) -> String {
+    format!(
+        "{prefix}_{version}_{platform}_{arch}.{ext}",
+        prefix = config.network.archive_prefix,
+        platform = target.platform.as_str(),
+        arch = target.arch.as_str(),
+        ext = target.platform.archive_ext()
+    )
+}
+
 async fn download_and_extract(
     config: &Config,
     downloader: &Downloader,
@@ -561,15 +710,32 @@ async fn download_and_extract(
     version: &str,
     target: &Target,
 ) -> Result<ExtractedArchive> {
-    let archive_name = format!(
-        "{prefix}_{version}_{platform}_{arch}.{ext}",
-        prefix = config.network.archive_prefix,
-        platform = target.platform.as_str(),
-        arch = target.arch.as_str(),
-        ext = target.platform.archive_ext()
-    );
-
+    let archive_name = archive_name(config, version, target);
     let archive_url = format!("{release_url}{archive_name}");
+    download_and_extract_response(downloader, target, archive_name, archive_url, false)
+        .await?
+        .ok_or_else(|| eyre::eyre!("archive unexpectedly missing"))
+}
+
+async fn download_and_extract_optional(
+    config: &Config,
+    downloader: &Downloader,
+    release_url: &str,
+    version: &str,
+    target: &Target,
+) -> Result<Option<ExtractedArchive>> {
+    let archive_name = archive_name(config, version, target);
+    let archive_url = format!("{release_url}{archive_name}");
+    download_and_extract_response(downloader, target, archive_name, archive_url, true).await
+}
+
+async fn download_and_extract_response(
+    downloader: &Downloader,
+    target: &Target,
+    archive_name: String,
+    archive_url: String,
+    optional: bool,
+) -> Result<Option<ExtractedArchive>> {
     say!("downloading {archive_name}");
 
     let temp_dir = tempfile::tempdir()?;
@@ -577,7 +743,15 @@ async fn download_and_extract(
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir)?;
 
-    downloader.download_to_file(&archive_url, &archive_path).await?;
+    if optional {
+        if downloader.download_to_file_optional(&archive_url, &archive_path).await?
+            == FileDownload::NotFound
+        {
+            return Ok(None);
+        }
+    } else {
+        downloader.download_to_file(&archive_url, &archive_path).await?;
+    }
 
     if target.platform == Platform::Win32 {
         extract_zip(&archive_path, &extract_dir)?;
@@ -597,7 +771,7 @@ async fn download_and_extract(
         }
     }
 
-    Ok(ExtractedArchive { _temp_dir: temp_dir, path: extract_dir })
+    Ok(Some(ExtractedArchive { _temp_dir: temp_dir, path: extract_dir }))
 }
 
 fn validate_extracted_binaries(config: &Config, dir: &Path) -> Result<()> {
@@ -980,7 +1154,11 @@ pub(crate) async fn resolve_version_and_tag(
         Ok((tag.clone(), tag))
     } else if version == "nightly" {
         say!("fetching latest nightly release tags from {repo}...");
-        let tag = fetch_latest_nightly_release_tag(downloader, repo).await?;
+        let tag = fetch_latest_nightly_release_tags(downloader, repo)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| eyre::eyre!("could not find a nightly release tag for {repo}"))?;
         say!("resolved nightly release tag: {tag}");
         Ok(("nightly".to_string(), tag))
     } else {
@@ -1039,14 +1217,17 @@ pub(crate) fn tag_from_release_url(url: &str) -> Option<String> {
     valid.then(|| tag.to_string())
 }
 
-/// Fetches the newest nightly release tag for `repo`.
+/// Fetches recent nightly release tags for `repo`, newest first.
 ///
 /// Prefers GitHub's public releases Atom feed, which is not subject to the
 /// unauthenticated REST API rate limit, and falls back to the API when the feed
 /// cannot be fetched or parsed.
-async fn fetch_latest_nightly_release_tag(downloader: &Downloader, repo: &str) -> Result<String> {
-    if let Some(tag) = fetch_latest_nightly_release_tag_via_feed(downloader, repo).await {
-        return Ok(tag);
+async fn fetch_latest_nightly_release_tags(
+    downloader: &Downloader,
+    repo: &str,
+) -> Result<Vec<String>> {
+    if let Some(tags) = fetch_latest_nightly_release_tags_via_feed(downloader, repo).await {
+        return Ok(tags);
     }
 
     let url = format!("https://api.github.com/repos/{repo}/releases");
@@ -1054,19 +1235,19 @@ async fn fetch_latest_nightly_release_tag(downloader: &Downloader, repo: &str) -
         .download_to_string(&url)
         .await
         .wrap_err("failed to fetch release tags from GitHub API")?;
-    latest_nightly_release_tag(&body, repo)
+    latest_nightly_release_tags(&body, repo)
 }
 
-async fn fetch_latest_nightly_release_tag_via_feed(
+async fn fetch_latest_nightly_release_tags_via_feed(
     downloader: &Downloader,
     repo: &str,
-) -> Option<String> {
+) -> Option<Vec<String>> {
     let url = format!("https://github.com/{repo}/releases.atom");
     let body = downloader.download_to_string(&url).await.ok()?;
-    latest_nightly_release_tag_from_feed(&body, repo)
+    latest_nightly_release_tags_from_feed(&body, repo)
 }
 
-fn latest_nightly_release_tag_from_feed(feed: &str, repo: &str) -> Option<String> {
+fn latest_nightly_release_tags_from_feed(feed: &str, repo: &str) -> Option<Vec<String>> {
     let mut reader = Reader::from_str(feed);
     reader.config_mut().trim_text(true);
 
@@ -1136,6 +1317,13 @@ fn latest_nightly_release_tag_from_feed(feed: &str, repo: &str) -> Option<String
                 in_feed = false;
                 feed_closed = true;
             }
+            Ok(Event::Text(event)) if feed_closed => {
+                let text = event.decode().ok()?;
+                if !text.trim().is_empty() {
+                    return None;
+                }
+            }
+            Ok(Event::CData(_) | Event::End(_)) if feed_closed => return None,
             Ok(Event::Eof) => break,
             Err(_) => return None,
             _ => {}
@@ -1145,7 +1333,19 @@ fn latest_nightly_release_tag_from_feed(feed: &str, repo: &str) -> Option<String
     if !feed_closed {
         return None;
     }
-    candidates.into_iter().max_by_key(|(updated, _)| *updated).map(|(_, tag)| tag)
+    let candidates = sort_nightly_candidates(candidates);
+    (!candidates.is_empty()).then_some(candidates)
+}
+
+fn sort_nightly_candidates(mut candidates: Vec<(OffsetDateTime, String)>) -> Vec<String> {
+    candidates.sort_by(|(left, _), (right, _)| right.cmp(left));
+    let mut seen = HashSet::new();
+    candidates
+        .into_iter()
+        .map(|(_, tag)| tag)
+        .filter(|tag| seen.insert(tag.clone()))
+        .take(NIGHTLY_CANDIDATE_LIMIT)
+        .collect()
 }
 
 fn nightly_tag_from_release_url(url: &str, repo: &str) -> Option<String> {
@@ -1177,27 +1377,33 @@ fn nightly_tag_from_release_url(url: &str, repo: &str) -> Option<String> {
     if segments.next().is_some() {
         return None;
     }
-    let sha = tag.strip_prefix("nightly-")?;
-    (sha.len() == 40
-        && sha.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
-    .then(|| tag.to_string())
+    valid_nightly_tag(tag).then(|| tag.to_string())
 }
 
-fn latest_nightly_release_tag(json: &str, repo: &str) -> Result<String> {
+fn latest_nightly_release_tags(json: &str, repo: &str) -> Result<Vec<String>> {
     let json: serde_json::Value = serde_json::from_str(json)?;
     let releases =
         json.as_array().ok_or_else(|| eyre::eyre!("invalid release tags response for {repo}"))?;
 
-    releases
+    let candidates = releases
         .iter()
         .filter_map(|release| {
             let tag = release["tag_name"].as_str()?;
-            let published_at = release["published_at"].as_str()?;
-            tag.starts_with("nightly-").then_some((published_at, tag))
+            let published_at =
+                OffsetDateTime::parse(release["published_at"].as_str()?, &Rfc3339).ok()?;
+            valid_nightly_tag(tag).then_some((published_at, tag.to_string()))
         })
-        .max_by_key(|(published_at, _tag)| *published_at)
-        .map(|(_published_at, tag)| tag.to_string())
-        .ok_or_else(|| eyre::eyre!("could not find a nightly release tag for {repo}"))
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        bail!("could not find a nightly release tag for {repo}");
+    }
+    Ok(sort_nightly_candidates(candidates))
+}
+
+fn valid_nightly_tag(tag: &str) -> bool {
+    let Some(sha) = tag.strip_prefix("nightly-") else { return false };
+    sha.len() == 40
+        && sha.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn normalize_version(version: &str) -> (String, String) {
@@ -1288,18 +1494,26 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Runtime::new().unwrap().block_on(future)
+    }
+
     #[test]
-    fn latest_nightly_release_tag_from_github_feed_fixture() {
+    fn latest_nightly_release_tags_from_github_feed_fixture() {
         let feed = include_str!("../tests/fixtures/github-releases.atom");
 
         assert_eq!(
-            latest_nightly_release_tag_from_feed(feed, "foundry-rs/foundry"),
-            Some("nightly-3333333333333333333333333333333333333333".to_string())
+            latest_nightly_release_tags_from_feed(feed, "foundry-rs/foundry"),
+            Some(vec![
+                "nightly-3333333333333333333333333333333333333333".to_string(),
+                "nightly-1111111111111111111111111111111111111111".to_string(),
+                "nightly-2222222222222222222222222222222222222222".to_string(),
+            ])
         );
     }
 
     #[test]
-    fn latest_nightly_release_tag_from_feed_selects_newest_updated_entry() {
+    fn latest_nightly_release_tags_from_feed_sort_newest_first() {
         let old = "nightly-1111111111111111111111111111111111111111";
         let new = "nightly-2222222222222222222222222222222222222222";
         let middle = "nightly-3333333333333333333333333333333333333333";
@@ -1321,8 +1535,8 @@ mod tests {
         );
 
         assert_eq!(
-            latest_nightly_release_tag_from_feed(&feed, "foundry-rs/foundry"),
-            Some(new.to_string())
+            latest_nightly_release_tags_from_feed(&feed, "foundry-rs/foundry"),
+            Some(vec![new.to_string(), middle.to_string(), old.to_string()])
         );
     }
 
@@ -1345,8 +1559,8 @@ mod tests {
         );
 
         assert_eq!(
-            latest_nightly_release_tag_from_feed(&feed, "foundry-rs/foundry"),
-            Some(nightly.to_string())
+            latest_nightly_release_tags_from_feed(&feed, "foundry-rs/foundry"),
+            Some(vec![nightly.to_string()])
         );
     }
 
@@ -1359,10 +1573,11 @@ mod tests {
             r#"<feed><entry><updated>2026-05-01T00:00:00Z</updated>"#,
             r#"<feed><entry><updated>2026-05-01T00:00:00Z</updated><link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/nightly-1111111111111111111111111111111111111111"/></entry>"#,
             r#"<entry><updated>2026-05-01T00:00:00Z</updated><link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/nightly-1111111111111111111111111111111111111111"/></entry>"#,
+            r#"<feed><entry><updated>2026-05-01T00:00:00Z</updated><link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/nightly-1111111111111111111111111111111111111111"/></entry></feed>garbage"#,
         ];
 
         for feed in invalid_feeds {
-            assert_eq!(latest_nightly_release_tag_from_feed(feed, "foundry-rs/foundry"), None);
+            assert_eq!(latest_nightly_release_tags_from_feed(feed, "foundry-rs/foundry"), None);
         }
     }
 
@@ -1384,8 +1599,8 @@ mod tests {
         );
 
         assert_eq!(
-            latest_nightly_release_tag_from_feed(&feed, "foundry-rs/foundry"),
-            Some(valid.to_string())
+            latest_nightly_release_tags_from_feed(&feed, "foundry-rs/foundry"),
+            Some(vec![valid.to_string()])
         );
     }
 
@@ -1407,8 +1622,8 @@ mod tests {
         );
 
         assert_eq!(
-            latest_nightly_release_tag_from_feed(&feed, "foundry-rs/foundry"),
-            Some(newer.to_string())
+            latest_nightly_release_tags_from_feed(&feed, "foundry-rs/foundry"),
+            Some(vec![newer.to_string(), older.to_string()])
         );
     }
 
@@ -1417,7 +1632,10 @@ mod tests {
         let feed = include_str!("../tests/fixtures/github-releases.atom");
 
         assert_eq!(
-            latest_nightly_release_tag_from_feed(feed, "FOUNDRY-RS/FOUNDRY"),
+            latest_nightly_release_tags_from_feed(feed, "FOUNDRY-RS/FOUNDRY")
+                .unwrap()
+                .first()
+                .cloned(),
             Some("nightly-3333333333333333333333333333333333333333".to_string())
         );
     }
@@ -1436,50 +1654,172 @@ mod tests {
         );
 
         assert_eq!(
-            latest_nightly_release_tag_from_feed(&feed, "foundry-rs/foundry"),
-            Some(nightly.to_string())
+            latest_nightly_release_tags_from_feed(&feed, "foundry-rs/foundry"),
+            Some(vec![nightly.to_string()])
         );
     }
 
     #[test]
-    fn latest_nightly_release_tag_selects_newest_published_at() {
-        let json = r#"[
-            {"tag_name": "nightly-old", "published_at": "2026-05-01T00:00:00Z"},
-            {"tag_name": "v1.5.0", "published_at": "2026-06-01T00:00:00Z"},
-            {"tag_name": "nightly-new", "published_at": "2026-05-03T00:00:00Z"},
-            {"tag_name": "nightly-middle", "published_at": "2026-05-02T00:00:00Z"}
-        ]"#;
+    fn latest_nightly_release_tags_select_newest_published_at() {
+        let old = "nightly-1111111111111111111111111111111111111111";
+        let new = "nightly-2222222222222222222222222222222222222222";
+        let middle = "nightly-3333333333333333333333333333333333333333";
+        let json = format!(
+            r#"[
+            {{"tag_name": "{old}", "published_at": "2026-05-01T00:00:00Z"}},
+            {{"tag_name": "v1.5.0", "published_at": "2026-06-01T00:00:00Z"}},
+            {{"tag_name": "{new}", "published_at": "2026-05-03T00:00:00Z"}},
+            {{"tag_name": "{middle}", "published_at": "2026-05-02T00:00:00Z"}}
+        ]"#
+        );
 
-        let tag = latest_nightly_release_tag(json, "foundry-rs/foundry").unwrap();
+        let tags = latest_nightly_release_tags(&json, "foundry-rs/foundry").unwrap();
 
-        assert_eq!(tag, "nightly-new");
+        assert_eq!(tags, vec![new.to_string(), middle.to_string(), old.to_string()]);
     }
 
     #[test]
-    fn latest_nightly_release_tag_ignores_non_nightly_releases() {
-        let json = r#"[
-            {"tag_name": "v2.0.0", "published_at": "2026-06-01T00:00:00Z"},
-            {"tag_name": "stable", "published_at": "2026-06-02T00:00:00Z"},
-            {"tag_name": "nightly-abc", "published_at": "2026-05-01T00:00:00Z"}
-        ]"#;
+    fn latest_nightly_release_tags_ignore_invalid_and_non_nightly_releases() {
+        let nightly = "nightly-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let json = format!(
+            r#"[
+            {{"tag_name": "v2.0.0", "published_at": "2026-06-01T00:00:00Z"}},
+            {{"tag_name": "stable", "published_at": "2026-06-02T00:00:00Z"}},
+            {{"tag_name": "nightly-abc", "published_at": "2026-05-02T00:00:00Z"}},
+            {{"tag_name": "{nightly}", "published_at": "2026-05-01T00:00:00Z"}}
+        ]"#
+        );
 
-        let tag = latest_nightly_release_tag(json, "foundry-rs/foundry").unwrap();
+        let tags = latest_nightly_release_tags(&json, "foundry-rs/foundry").unwrap();
 
-        assert_eq!(tag, "nightly-abc");
+        assert_eq!(tags, vec![nightly.to_string()]);
     }
 
     #[test]
-    fn latest_nightly_release_tag_errors_when_no_nightly_exists() {
+    fn nightly_candidates_are_deduplicated_and_bounded() {
+        let mut candidates = Vec::new();
+        for i in 0..=NIGHTLY_CANDIDATE_LIMIT {
+            let tag = format!("nightly-{i:040x}");
+            let updated =
+                OffsetDateTime::parse(&format!("2026-05-{:02}T00:00:00Z", i + 1), &Rfc3339)
+                    .unwrap();
+            candidates.push((updated, tag.clone()));
+            candidates.push((updated - Duration::from_secs(1), tag));
+        }
+
+        let tags = sort_nightly_candidates(candidates);
+
+        let expected = (1..=NIGHTLY_CANDIDATE_LIMIT)
+            .rev()
+            .map(|i| format!("nightly-{i:040x}"))
+            .collect::<Vec<_>>();
+        assert_eq!(tags, expected);
+    }
+
+    #[test]
+    fn latest_nightly_release_tags_ignore_invalid_timestamps() {
+        let json = r#"[
+            {"tag_name": "nightly-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "published_at": "invalid"},
+            {"tag_name": "nightly-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "published_at": "2026-05-01T00:00:00Z"}
+        ]"#;
+
+        let tags = latest_nightly_release_tags(json, "foundry-rs/foundry").unwrap();
+
+        assert_eq!(tags, vec!["nightly-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]);
+    }
+
+    #[test]
+    fn latest_nightly_release_tags_error_when_no_nightly_exists() {
         let json = r#"[
             {"tag_name": "v2.0.0", "published_at": "2026-06-01T00:00:00Z"}
         ]"#;
 
-        let err = latest_nightly_release_tag(json, "foundry-rs/foundry").unwrap_err();
+        let err = latest_nightly_release_tags(json, "foundry-rs/foundry").unwrap_err();
 
         assert_data_eq!(
             err.to_string(),
             str!["could not find a nightly release tag for foundry-rs/foundry"]
         );
+    }
+
+    #[test]
+    fn nightly_candidates_fall_back_only_after_absent_archive() {
+        block_on(async {
+            let newest = "nightly-1111111111111111111111111111111111111111".to_string();
+            let previous = "nightly-2222222222222222222222222222222222222222".to_string();
+            let attempted = std::cell::RefCell::new(Vec::new());
+            let target = Target { platform: Platform::Linux, arch: crate::platform::Arch::Amd64 };
+
+            try_nightly_candidates(
+                vec![newest.clone(), previous.clone()],
+                &target,
+                "foundry_nightly_linux_amd64.tar.gz",
+                |tag| {
+                    attempted.borrow_mut().push(tag.clone());
+                    std::future::ready(Ok(tag == previous))
+                },
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(attempted.into_inner(), vec![newest, previous]);
+        });
+    }
+
+    #[test]
+    fn nightly_candidates_do_not_fall_back_after_other_errors() {
+        block_on(async {
+            let newest = "nightly-1111111111111111111111111111111111111111".to_string();
+            let previous = "nightly-2222222222222222222222222222222222222222".to_string();
+            let attempted = std::cell::RefCell::new(Vec::new());
+            let target = Target { platform: Platform::Linux, arch: crate::platform::Arch::Amd64 };
+
+            let err = try_nightly_candidates(
+                vec![newest.clone(), previous],
+                &target,
+                "foundry_nightly_linux_amd64.tar.gz",
+                |tag| {
+                    attempted.borrow_mut().push(tag);
+                    std::future::ready(Err(eyre::eyre!("HTTP 503 Service Unavailable")))
+                },
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(err.to_string(), "HTTP 503 Service Unavailable");
+            assert_eq!(attempted.into_inner(), vec![newest]);
+        });
+    }
+
+    #[test]
+    fn nightly_candidates_report_all_absent_tags() {
+        block_on(async {
+            let first = "nightly-1111111111111111111111111111111111111111".to_string();
+            let second = "nightly-2222222222222222222222222222222222222222".to_string();
+            let target = Target { platform: Platform::Darwin, arch: crate::platform::Arch::Arm64 };
+
+            let err = try_nightly_candidates(
+                vec![first.clone(), second.clone()],
+                &target,
+                "foundry_nightly_darwin_arm64.tar.gz",
+                |_| std::future::ready(Ok(false)),
+            )
+            .await
+            .unwrap_err();
+
+            assert!(err.to_string().contains("darwin/arm64"));
+            assert!(err.to_string().contains(&first));
+            assert!(err.to_string().contains(&second));
+        });
+    }
+
+    #[test]
+    fn archive_name_uses_requested_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let target = Target { platform: Platform::Win32, arch: crate::platform::Arch::Amd64 };
+
+        assert_eq!(archive_name(&config, "nightly", &target), "foundry_nightly_win32_amd64.zip");
     }
 
     #[test]

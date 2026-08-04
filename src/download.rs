@@ -32,6 +32,10 @@ fn is_retryable_status(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 403 | 408 | 429 | 500 | 502 | 503 | 504)
 }
 
+fn is_file_not_found(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::NOT_FOUND
+}
+
 /// Retry scope matching every GitHub host foundryup talks to, including the
 /// CDN hosts that release downloads redirect to.
 struct GitHubHosts;
@@ -71,6 +75,12 @@ fn is_github_api_url(url: &reqwest::Url) -> bool {
 
 pub(crate) struct Downloader {
     client: reqwest::Client,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileDownload {
+    Downloaded,
+    NotFound,
 }
 
 impl Downloader {
@@ -122,7 +132,30 @@ impl Downloader {
     }
 
     pub(crate) async fn download_to_file(&self, url: &str, path: &Path) -> Result<()> {
-        let response = self.send_ok(url).await?;
+        match self.download_to_file_optional(url, path).await? {
+            FileDownload::Downloaded => Ok(()),
+            FileDownload::NotFound => bail!("failed to download {url}: HTTP 404 Not Found"),
+        }
+    }
+
+    /// Downloads `url` to `path`, returning [`FileDownload::NotFound`] only for
+    /// a terminal HTTP 404 response.
+    ///
+    /// All transport failures and other non-success statuses remain errors so
+    /// callers can distinguish an absent release asset from a broader GitHub or
+    /// network failure. A successful response body is streamed exactly once.
+    pub(crate) async fn download_to_file_optional(
+        &self,
+        url: &str,
+        path: &Path,
+    ) -> Result<FileDownload> {
+        let response = self.send(url).await?;
+        if is_file_not_found(response.status()) {
+            return Ok(FileDownload::NotFound);
+        }
+        if !response.status().is_success() {
+            bail!("failed to download {url}: HTTP {}", response.status());
+        }
 
         let total_size = response.content_length();
 
@@ -161,7 +194,7 @@ impl Downloader {
         }
 
         pb.finish_and_clear();
-        Ok(())
+        Ok(FileDownload::Downloaded)
     }
 
     pub(crate) async fn download_to_string(&self, url: &str) -> Result<String> {
@@ -271,6 +304,14 @@ mod tests {
         }
         for code in [200, 301, 400, 401, 404, 410] {
             assert!(!is_retryable_status(reqwest::StatusCode::from_u16(code).unwrap()));
+        }
+    }
+
+    #[test]
+    fn only_not_found_is_an_absent_file_download() {
+        assert!(is_file_not_found(reqwest::StatusCode::NOT_FOUND));
+        for code in [400, 401, 403, 408, 410, 429, 500, 502, 503, 504] {
+            assert!(!is_file_not_found(reqwest::StatusCode::from_u16(code).unwrap()));
         }
     }
 
