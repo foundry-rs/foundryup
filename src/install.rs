@@ -1494,12 +1494,12 @@ mod tests {
             let newest = "nightly-new".to_string();
             let previous = "nightly-previous".to_string();
 
-            let selected = select_available_nightly_release_tag(
-                vec![newest, previous.clone()],
-                |tag| std::future::ready(Ok(tag == "nightly-previous")),
-            )
-            .await
-            .unwrap();
+            let selected =
+                select_available_nightly_release_tag(vec![newest, previous.clone()], |tag| {
+                    std::future::ready(Ok(tag == "nightly-previous"))
+                })
+                .await
+                .unwrap();
 
             assert_eq!(selected, Some(previous));
         });
