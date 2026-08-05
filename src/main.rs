@@ -84,7 +84,15 @@ async fn run(cli: Cli) -> Result<()> {
         // An empty `--use` value is rejected at parse time by `parse_use_version`, so `version` is
         // always non-empty here.
         let repo = cli.repo.as_deref().unwrap_or(config.network.repo);
-        return install::use_version_resolved(&config, repo, version, cli.repo.is_some()).await;
+        return install::use_version_resolved(
+            &config,
+            repo,
+            version,
+            cli.repo.is_some(),
+            cli.platform.as_deref(),
+            cli.arch.as_deref(),
+        )
+        .await;
     }
 
     if cli.network.is_some() {

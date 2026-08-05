@@ -40,16 +40,18 @@ async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
 
     let downloader = Downloader::new()?;
 
+    let target = Target::detect(args.platform.as_deref(), args.arch.as_deref())?;
+    let nightly_archive = archive_name(config, "nightly", &target);
+
     let (version, tag) = resolve_version_and_tag(
         &downloader,
         repo,
         args.version.as_deref().unwrap_or(config.network.default_version),
+        &nightly_archive,
     )
     .await?;
 
     say!("installing {} (version {version}, tag {tag})", config.network.display_name);
-
-    let target = Target::detect(args.platform.as_deref(), args.arch.as_deref())?;
 
     let release_url =
         format!("https://github.com/{}/releases/download/{tag}/", config.network.repo);
@@ -554,6 +556,16 @@ struct ExtractedArchive {
     path: PathBuf,
 }
 
+fn archive_name(config: &Config, version: &str, target: &Target) -> String {
+    format!(
+        "{prefix}_{version}_{platform}_{arch}.{ext}",
+        prefix = config.network.archive_prefix,
+        platform = target.platform.as_str(),
+        arch = target.arch.as_str(),
+        ext = target.platform.archive_ext()
+    )
+}
+
 async fn download_and_extract(
     config: &Config,
     downloader: &Downloader,
@@ -561,13 +573,7 @@ async fn download_and_extract(
     version: &str,
     target: &Target,
 ) -> Result<ExtractedArchive> {
-    let archive_name = format!(
-        "{prefix}_{version}_{platform}_{arch}.{ext}",
-        prefix = config.network.archive_prefix,
-        platform = target.platform.as_str(),
-        arch = target.arch.as_str(),
-        ext = target.platform.archive_ext()
-    );
+    let archive_name = archive_name(config, version, target);
 
     let archive_url = format!("{release_url}{archive_name}");
     say!("downloading {archive_name}");
@@ -799,10 +805,15 @@ pub(crate) async fn use_version_resolved(
     repo: &str,
     version: &str,
     repo_explicit: bool,
+    platform: Option<&str>,
+    arch: Option<&str>,
 ) -> Result<()> {
     let tag = if is_resolvable_use_version(version) {
         let downloader = Downloader::new()?;
-        let (_version, tag) = resolve_version_and_tag(&downloader, repo, version).await?;
+        let target = Target::detect(platform, arch)?;
+        let nightly_archive = archive_name(config, "nightly", &target);
+        let (_version, tag) =
+            resolve_version_and_tag(&downloader, repo, version, &nightly_archive).await?;
         tag
     } else {
         version.to_string()
@@ -972,6 +983,7 @@ pub(crate) async fn resolve_version_and_tag(
     downloader: &Downloader,
     repo: &str,
     version: &str,
+    nightly_archive: &str,
 ) -> Result<(String, String)> {
     if version == "latest" || version == "stable" {
         say!("fetching latest release tag from {repo}...");
@@ -980,7 +992,7 @@ pub(crate) async fn resolve_version_and_tag(
         Ok((tag.clone(), tag))
     } else if version == "nightly" {
         say!("fetching latest nightly release tags from {repo}...");
-        let tag = fetch_latest_nightly_release_tag(downloader, repo).await?;
+        let tag = fetch_latest_nightly_release_tag(downloader, repo, nightly_archive).await?;
         say!("resolved nightly release tag: {tag}");
         Ok(("nightly".to_string(), tag))
     } else {
@@ -1042,10 +1054,18 @@ pub(crate) fn tag_from_release_url(url: &str) -> Option<String> {
 /// Fetches the newest nightly release tag for `repo`.
 ///
 /// Prefers GitHub's public releases Atom feed, which is not subject to the
-/// unauthenticated REST API rate limit, and falls back to the API when the feed
-/// cannot be fetched or parsed.
-async fn fetch_latest_nightly_release_tag(downloader: &Downloader, repo: &str) -> Result<String> {
-    if let Some(tag) = fetch_latest_nightly_release_tag_via_feed(downloader, repo).await {
+/// unauthenticated REST API rate limit. The requested archive is checked for
+/// availability because GitHub can expose draft releases in the feed before
+/// their assets can be downloaded. Falls back to the API when the feed cannot
+/// be fetched, parsed, or does not contain an available nightly.
+async fn fetch_latest_nightly_release_tag(
+    downloader: &Downloader,
+    repo: &str,
+    archive_name: &str,
+) -> Result<String> {
+    if let Some(tag) =
+        fetch_latest_nightly_release_tag_via_feed(downloader, repo, archive_name).await?
+    {
         return Ok(tag);
     }
 
@@ -1060,13 +1080,36 @@ async fn fetch_latest_nightly_release_tag(downloader: &Downloader, repo: &str) -
 async fn fetch_latest_nightly_release_tag_via_feed(
     downloader: &Downloader,
     repo: &str,
-) -> Option<String> {
+    archive_name: &str,
+) -> Result<Option<String>> {
     let url = format!("https://github.com/{repo}/releases.atom");
-    let body = downloader.download_to_string(&url).await.ok()?;
-    latest_nightly_release_tag_from_feed(&body, repo)
+    let Ok(body) = downloader.download_to_string(&url).await else { return Ok(None) };
+    let Some(candidates) = nightly_release_tags_from_feed(&body, repo) else { return Ok(None) };
+
+    select_available_nightly_release_tag(candidates, |tag| {
+        let url = format!("https://github.com/{repo}/releases/download/{tag}/{archive_name}");
+        async move { downloader.is_url_available(&url).await }
+    })
+    .await
 }
 
-fn latest_nightly_release_tag_from_feed(feed: &str, repo: &str) -> Option<String> {
+async fn select_available_nightly_release_tag<F, Fut>(
+    candidates: Vec<String>,
+    mut is_available: F,
+) -> Result<Option<String>>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<bool>>,
+{
+    for tag in candidates {
+        if is_available(tag.clone()).await? {
+            return Ok(Some(tag));
+        }
+    }
+    Ok(None)
+}
+
+fn nightly_release_tags_from_feed(feed: &str, repo: &str) -> Option<Vec<String>> {
     let mut reader = Reader::from_str(feed);
     reader.config_mut().trim_text(true);
 
@@ -1145,7 +1188,13 @@ fn latest_nightly_release_tag_from_feed(feed: &str, repo: &str) -> Option<String
     if !feed_closed {
         return None;
     }
-    candidates.into_iter().max_by_key(|(updated, _)| *updated).map(|(_, tag)| tag)
+    candidates.sort_unstable_by_key(|(updated, _)| std::cmp::Reverse(*updated));
+    (!candidates.is_empty()).then(|| candidates.into_iter().map(|(_, tag)| tag).collect())
+}
+
+#[cfg(test)]
+fn latest_nightly_release_tag_from_feed(feed: &str, repo: &str) -> Option<String> {
+    nightly_release_tags_from_feed(feed, repo)?.into_iter().next()
 }
 
 fn nightly_tag_from_release_url(url: &str, repo: &str) -> Option<String> {
@@ -1439,6 +1488,23 @@ mod tests {
             latest_nightly_release_tag_from_feed(&feed, "foundry-rs/foundry"),
             Some(nightly.to_string())
         );
+    }
+
+    #[test]
+    fn available_nightly_release_skips_unpublished_candidate() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let newest = "nightly-new".to_string();
+            let previous = "nightly-previous".to_string();
+
+            let selected =
+                select_available_nightly_release_tag(vec![newest, previous.clone()], |tag| {
+                    std::future::ready(Ok(tag == "nightly-previous"))
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(selected, Some(previous));
+        });
     }
 
     #[test]

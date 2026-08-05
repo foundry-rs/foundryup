@@ -190,6 +190,28 @@ impl Downloader {
         Ok(response.url().to_string())
     }
 
+    /// Returns whether `url` is publicly available without downloading its body.
+    ///
+    /// A 404 is reported as unavailable. Transport failures and every other
+    /// non-success status remain errors so callers do not mistake an outage for
+    /// a missing resource.
+    pub(crate) async fn is_url_available(&self, url: &str) -> Result<bool> {
+        let parsed = reqwest::Url::parse(url).wrap_err_with(|| format!("invalid URL {url}"))?;
+        let response = self
+            .client
+            .head(parsed)
+            .send()
+            .await
+            .wrap_err_with(|| format!("failed to HEAD {url}"))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        if !response.status().is_success() {
+            bail!("failed to probe {url}: HTTP {}", response.status());
+        }
+        Ok(true)
+    }
+
     /// Like [`download_to_string`](Self::download_to_string), but returns
     /// `Ok(None)` when the server responds with HTTP 404 Not Found.
     ///
