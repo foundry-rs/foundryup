@@ -805,10 +805,12 @@ pub(crate) async fn use_version_resolved(
     repo: &str,
     version: &str,
     repo_explicit: bool,
+    platform: Option<&str>,
+    arch: Option<&str>,
 ) -> Result<()> {
     let tag = if is_resolvable_use_version(version) {
         let downloader = Downloader::new()?;
-        let target = Target::detect(None, None)?;
+        let target = Target::detect(platform, arch)?;
         let nightly_archive = archive_name(config, "nightly", &target);
         let (_version, tag) =
             resolve_version_and_tag(&downloader, repo, version, &nightly_archive).await?;
