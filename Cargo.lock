@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "foundryup"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "base64 0.23.0",
  "clap",
