@@ -387,14 +387,44 @@ async fn fetch_and_verify_attestation(
 
     let version_dir = config.version_dir(repo, tag);
 
-    if version_dir.exists() && installed_bins_match_hashes(config, &version_dir, &hashes)? {
-        say!("version {tag} already installed and verified, activating...");
-        use_version(config, repo, tag)?;
-        say!("done!");
-        return Ok(PrebuiltCheck::AlreadyActivated);
+    if !version_dir.exists() {
+        say!("version {tag} is not installed, downloading binaries");
+    } else {
+        match installed_bins_status(config, &version_dir, &hashes)? {
+            InstalledBinsStatus::Verified => {
+                say!("version {tag} already installed and verified, activating...");
+                use_version(config, repo, tag)?;
+                say!("done!");
+                return Ok(PrebuiltCheck::AlreadyActivated);
+            }
+            InstalledBinsStatus::Missing(bin) => {
+                say!(
+                    "installed version {tag} is incomplete (missing {bin}), downloading and verifying a fresh copy"
+                );
+            }
+            InstalledBinsStatus::NonExecutable(bin) => {
+                say!(
+                    "installed version {tag} is incomplete ({bin} is not executable), downloading and verifying a fresh copy"
+                );
+            }
+            InstalledBinsStatus::HashError(bin) => {
+                bail!(
+                    "installed version {tag} cannot be verified (could not calculate a hash for {bin}), aborting installation"
+                );
+            }
+            InstalledBinsStatus::HashMismatch(bin) => {
+                say!(
+                    "installed version {tag} did not pass SHA-256 verification ({bin}), downloading and verifying a fresh copy"
+                );
+            }
+            InstalledBinsStatus::Unverifiable(bin) => {
+                say!(
+                    "installed version {tag} cannot be verified (no expected hash for {bin}), downloading a fresh copy"
+                );
+            }
+        }
     }
 
-    say!("binaries not found or do not match expected hashes, downloading new binaries");
     Ok(PrebuiltCheck::Download(Some(hashes)))
 }
 
@@ -530,24 +560,43 @@ where
     if subjects.is_empty() { "none".to_string() } else { subjects.join(", ") }
 }
 
-fn installed_bins_match_hashes(
+#[derive(Debug, PartialEq, Eq)]
+enum InstalledBinsStatus {
+    Verified,
+    Missing(String),
+    NonExecutable(String),
+    HashError(String),
+    HashMismatch(String),
+    Unverifiable(String),
+}
+
+fn installed_bins_status(
     config: &Config,
     version_dir: &Path,
     hashes: &HashMap<String, String>,
-) -> Result<bool> {
+) -> Result<InstalledBinsStatus> {
     for &Bin { optional, name: bin } in config.network.bins {
         let bin_name = bin_name(bin);
         let path = version_dir.join(&bin_name);
         if let Some(expected_hash) = expected_hash(hashes, bin, &bin_name)? {
-            if !is_executable(&path) || compute_sha256(&path)? != *expected_hash {
-                return Ok(false);
+            if !path.exists() {
+                return Ok(InstalledBinsStatus::Missing(bin_name));
+            }
+            if !is_executable(&path) {
+                return Ok(InstalledBinsStatus::NonExecutable(bin_name));
+            }
+            let Ok(actual_hash) = compute_sha256(&path) else {
+                return Ok(InstalledBinsStatus::HashError(bin_name));
+            };
+            if actual_hash != *expected_hash {
+                return Ok(InstalledBinsStatus::HashMismatch(bin_name));
             }
         } else if !optional || path.exists() {
-            return Ok(false);
+            return Ok(InstalledBinsStatus::Unverifiable(bin_name));
         }
     }
 
-    Ok(true)
+    Ok(InstalledBinsStatus::Verified)
 }
 
 #[derive(Debug)]
@@ -670,7 +719,11 @@ fn verify_binaries(
                 failed = true;
             }
             Some(expected_hash) => {
-                let actual = compute_sha256(&path)?;
+                let actual = compute_sha256(&path).wrap_err_with(|| {
+                    format!(
+                        "could not calculate SHA-256 hash for downloaded {bin}, aborting installation"
+                    )
+                })?;
                 if actual != *expected_hash {
                     say!("{bin} hash verification failed:");
                     say!("  expected: {expected_hash}");
@@ -1883,7 +1936,10 @@ mod tests {
         fs::create_dir_all(&version_dir).unwrap();
         let hashes = write_required_hashed_bins(&version_dir, &config);
 
-        assert!(installed_bins_match_hashes(&config, &version_dir, &hashes).unwrap());
+        assert_eq!(
+            installed_bins_status(&config, &version_dir, &hashes).unwrap(),
+            InstalledBinsStatus::Verified
+        );
         verify_binaries(&config, &version_dir, &hashes).unwrap();
     }
 
@@ -1896,9 +1952,68 @@ mod tests {
         let mut hashes = write_required_hashed_bins(&version_dir, &config);
         hashes.insert("solar".to_string(), "0".repeat(64));
 
-        assert!(!installed_bins_match_hashes(&config, &version_dir, &hashes).unwrap());
+        assert_eq!(
+            installed_bins_status(&config, &version_dir, &hashes).unwrap(),
+            InstalledBinsStatus::Missing(bin_name("solar"))
+        );
         let err = verify_binaries(&config, &version_dir, &hashes).unwrap_err();
         assert!(err.to_string().contains("one or more binaries failed"));
+    }
+
+    #[test]
+    fn verification_reports_hash_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let version_dir = config.version_dir(config.network.repo, "v1.0.0");
+        fs::create_dir_all(&version_dir).unwrap();
+        let hashes = write_required_hashed_bins(&version_dir, &config);
+        write_executable(&version_dir.join(bin_name("forge")), b"changed");
+
+        assert_eq!(
+            installed_bins_status(&config, &version_dir, &hashes).unwrap(),
+            InstalledBinsStatus::HashMismatch(bin_name("forge"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verification_reports_non_executable_bin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let version_dir = config.version_dir(config.network.repo, "v1.0.0");
+        fs::create_dir_all(&version_dir).unwrap();
+        let hashes = write_required_hashed_bins(&version_dir, &config);
+        let forge = version_dir.join(bin_name("forge"));
+        fs::set_permissions(&forge, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert_eq!(
+            installed_bins_status(&config, &version_dir, &hashes).unwrap(),
+            InstalledBinsStatus::NonExecutable(bin_name("forge"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verification_reports_hash_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let version_dir = config.version_dir(config.network.repo, "v1.0.0");
+        fs::create_dir_all(&version_dir).unwrap();
+        let hashes = write_required_hashed_bins(&version_dir, &config);
+        let forge = version_dir.join(bin_name("forge"));
+        fs::set_permissions(&forge, std::fs::Permissions::from_mode(0o111)).unwrap();
+
+        assert_eq!(
+            installed_bins_status(&config, &version_dir, &hashes).unwrap(),
+            InstalledBinsStatus::HashError(bin_name("forge"))
+        );
+        let err = verify_binaries(&config, &version_dir, &hashes).unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "could not calculate SHA-256 hash for downloaded forge, aborting installation"
+            ),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -1910,7 +2025,10 @@ mod tests {
         let hashes = write_required_hashed_bins(&version_dir, &config);
         write_executable(&version_dir.join(bin_name("solar")), b"solar");
 
-        assert!(!installed_bins_match_hashes(&config, &version_dir, &hashes).unwrap());
+        assert_eq!(
+            installed_bins_status(&config, &version_dir, &hashes).unwrap(),
+            InstalledBinsStatus::Unverifiable(bin_name("solar"))
+        );
         let err = verify_binaries(&config, &version_dir, &hashes).unwrap_err();
         assert!(err.to_string().contains("one or more binaries failed"));
     }
@@ -1924,7 +2042,10 @@ mod tests {
         let mut hashes = write_required_hashed_bins(&version_dir, &config);
         write_hashed_bin(&version_dir, &mut hashes, "solar");
 
-        assert!(installed_bins_match_hashes(&config, &version_dir, &hashes).unwrap());
+        assert_eq!(
+            installed_bins_status(&config, &version_dir, &hashes).unwrap(),
+            InstalledBinsStatus::Verified
+        );
         verify_binaries(&config, &version_dir, &hashes).unwrap();
     }
 
