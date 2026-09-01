@@ -115,8 +115,13 @@ async fn run(cli: Cli) -> Result<()> {
     }
     .await;
 
-    // Report the update status regardless of whether the install succeeded; a
-    // failure of the background check itself must not mask an install error.
+    // Do not delay or mix an unrelated update status into failed-install
+    // output. A failed update check must not mask an install error either.
+    if install_result.is_err() {
+        update_handle.abort();
+        return install_result;
+    }
+
     match update_handle.await {
         Ok(update) => print_update(update),
         Err(e) => warn!("Could not check for updates: {e}"),
