@@ -46,14 +46,14 @@ fn detect_in_use<'a, 'n>(
 
 /// Exact name match, accepting the `.exe` extension on Windows.
 fn matches_bin(name: &OsStr, bin: &str) -> bool {
-    if name == OsStr::new(bin) {
-        return true;
-    }
     #[cfg(windows)]
-    if name == OsStr::new(&format!("{bin}.exe")) {
-        return true;
+    {
+        name == OsStr::new(bin) || name == OsStr::new(&format!("{bin}.exe"))
     }
-    false
+    #[cfg(not(windows))]
+    {
+        name == OsStr::new(bin)
+    }
 }
 
 #[cfg(test)]
