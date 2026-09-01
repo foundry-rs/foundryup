@@ -51,6 +51,15 @@ impl Platform {
             _ => "tar.gz",
         }
     }
+
+    /// Whether binaries for `self` can run on `host`.
+    ///
+    /// Linux hosts may select the Alpine artifact, which is the supported use
+    /// of the platform override. Other foreign-platform artifacts cannot be
+    /// activated or validated by foundryup on the current host.
+    fn is_compatible_with_host(self, host: Self) -> bool {
+        self == host || matches!((host, self), (Self::Linux, Self::Alpine))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +110,10 @@ impl Target {
             Some(p) => Platform::from_str(p)?,
             None => Platform::detect()?,
         };
+        let host = Platform::detect()?;
+        if !platform.is_compatible_with_host(host) {
+            bail!("cannot install {} binaries on a {} host", platform.as_str(), host.as_str());
+        }
         let arch = match arch_override {
             Some(a) => Arch::from_str(a),
             None => Arch::detect(),
@@ -164,10 +177,34 @@ mod tests {
     }
 
     // The Alpine/musl artifact is opt-in via `--platform alpine` / FOUNDRYUP_PLATFORM.
+    #[cfg(target_os = "linux")]
     #[test]
     fn alpine_override_still_selects_alpine() {
         let target = Target::detect(Some("alpine"), Some("x86_64")).unwrap();
         assert_eq!(target.platform, Platform::Alpine);
         assert_eq!(target.platform.as_str(), "alpine");
+    }
+
+    #[test]
+    fn platform_compatibility_allows_native_and_linux_alpine() {
+        assert!(Platform::Linux.is_compatible_with_host(Platform::Linux));
+        assert!(Platform::Alpine.is_compatible_with_host(Platform::Linux));
+        assert!(Platform::Darwin.is_compatible_with_host(Platform::Darwin));
+        assert!(Platform::Win32.is_compatible_with_host(Platform::Win32));
+    }
+
+    #[test]
+    fn platform_compatibility_rejects_foreign_operating_systems() {
+        assert!(!Platform::Win32.is_compatible_with_host(Platform::Linux));
+        assert!(!Platform::Darwin.is_compatible_with_host(Platform::Linux));
+        assert!(!Platform::Linux.is_compatible_with_host(Platform::Darwin));
+        assert!(!Platform::Linux.is_compatible_with_host(Platform::Win32));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn foreign_platform_override_is_rejected() {
+        let err = Target::detect(Some("win32"), None).unwrap_err();
+        assert_eq!(err.to_string(), "cannot install win32 binaries on a linux host");
     }
 }
