@@ -9,6 +9,12 @@ use eyre::{Result, WrapErr, bail};
 use fs_err as fs;
 use itertools::Itertools;
 use quick_xml::{Reader, XmlVersion, events::Event, name::QName};
+use semver::Version;
+use sigstore_verify::{
+    VerificationPolicy,
+    trust_root::{SIGSTORE_PRODUCTION_TRUSTED_ROOT, TrustedRoot},
+    types::{Bundle, Sha256Hash},
+};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -76,16 +82,16 @@ async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
 
     // A verified cache hit is already activated; return so `main` can still
     // print the foundryup self-update check instead of exiting the process here.
-    let hashes = match check {
+    let attestation = match check {
         PrebuiltCheck::AlreadyActivated => return Ok(()),
-        PrebuiltCheck::Download(hashes) => hashes,
+        PrebuiltCheck::Download(attestation) => attestation,
     };
 
     let extracted =
         download_and_extract(config, &downloader, &release_url, &version, &target).await?;
 
-    if let Some(ref hashes) = hashes {
-        verify_binaries(config, &extracted.path, hashes)?;
+    if let Some(ref attestation) = attestation {
+        verify_binaries(config, &extracted.path, &attestation.hashes)?;
     } else {
         validate_extracted_binaries(config, &extracted.path)?;
     }
@@ -327,14 +333,20 @@ async fn generate_manpages_from_source(config: &Config) -> Result<()> {
 }
 
 /// Outcome of the pre-download attestation check for a prebuilt install.
+#[derive(Debug)]
 enum PrebuiltCheck {
     /// The requested version was already installed and verified, and has been
     /// activated. The caller should finish without downloading anything.
     AlreadyActivated,
-    /// The binaries must be downloaded. The optional hashes are used to verify
-    /// them afterwards (`None` when the release has no attestation).
-    Download(Option<HashMap<String, String>>),
+    /// The binaries must be downloaded. The optional attestation is used to verify
+    /// them afterwards (`None` for releases predating mandatory attestations).
+    Download(Option<ReleaseAttestation>),
 }
+
+/// The first Foundry release that published Sigstore attestations.
+const FIRST_ATTESTED_VERSION: &str = "1.3.0-rc1";
+const GITHUB_ACTIONS_ISSUER: &str = "https://token.actions.githubusercontent.com";
+const RELEASE_WORKFLOW: &str = ".github/workflows/release.yml";
 
 // Missing attestation subjects can come from temporarily stale GitHub/CDN data;
 // keep semantic retries spaced out, but cap the delay so installs fail promptly.
@@ -362,35 +374,30 @@ async fn fetch_and_verify_attestation(
         arch = target.arch.as_str()
     );
 
-    // A 404 (genuinely absent attestation) skips verification. Transport failures and other HTTP
-    // errors are propagated so a network blip aborts the install rather than silently
-    // downgrading to an unverified binary.
+    // A 404 is only accepted for releases that predate attestations. Transport failures and other
+    // HTTP errors are propagated so a network blip cannot downgrade the install.
     let attestation_link = match downloader.download_to_string_optional(&attestation_url).await? {
         Some(content) => {
             let link = content.lines().next().unwrap_or("").trim().to_string();
             if link.is_empty() || link.contains("Not Found") {
-                say!("no attestation found for this release, skipping SHA verification");
-                return Ok(PrebuiltCheck::Download(None));
+                return missing_attestation(tag);
             }
             link
         }
-        None => {
-            say!("no attestation found for this release, skipping SHA verification");
-            return Ok(PrebuiltCheck::Download(None));
-        }
+        None => return missing_attestation(tag),
     };
 
     say!("found attestation for {tag} version, downloading attestation artifact, checking...");
 
     let artifact_url = format!("{attestation_link}/download");
-    let hashes = download_attestation_hashes(downloader, &artifact_url, bins, tag).await?;
+    let attestation = download_attestation(downloader, &artifact_url, bins, repo, tag).await?;
 
     let version_dir = config.version_dir(repo, tag);
 
     if !version_dir.exists() {
         say!("version {tag} is not installed, downloading binaries");
     } else {
-        match installed_bins_status(config, &version_dir, &hashes)? {
+        match installed_bins_status(config, &version_dir, &attestation.hashes)? {
             InstalledBinsStatus::Verified => {
                 say!("version {tag} already installed and verified, activating...");
                 use_version(config, repo, tag)?;
@@ -425,33 +432,66 @@ async fn fetch_and_verify_attestation(
         }
     }
 
-    Ok(PrebuiltCheck::Download(Some(hashes)))
+    Ok(PrebuiltCheck::Download(Some(attestation)))
 }
 
-async fn download_attestation_hashes(
+fn missing_attestation(tag: &str) -> Result<PrebuiltCheck> {
+    if attestation_required(tag) {
+        bail!(
+            "release {tag} requires a Sigstore attestation; refusing to download unverified binaries"
+        );
+    }
+
+    say!("no attestation found for legacy release {tag}, skipping SHA verification");
+    Ok(PrebuiltCheck::Download(None))
+}
+
+fn attestation_required(tag: &str) -> bool {
+    if tag == "nightly" || tag.starts_with("nightly-") {
+        return true;
+    }
+
+    let Some(version) = tag.strip_prefix('v').and_then(|tag| Version::parse(tag).ok()) else {
+        return false;
+    };
+    version >= Version::parse(FIRST_ATTESTED_VERSION).expect("valid attestation cutoff")
+}
+
+#[derive(Debug)]
+struct ReleaseAttestation {
+    hashes: HashMap<String, String>,
+}
+
+async fn download_attestation(
     downloader: &Downloader,
     artifact_url: &str,
     bins: &[Bin],
+    repo: &str,
     tag: &str,
-) -> Result<HashMap<String, String>> {
+) -> Result<ReleaseAttestation> {
     let max_attempts = max_retries().saturating_add(1);
     let mut attempt = 1;
     let mut retry_delay = ATTESTATION_RETRY_INITIAL_DELAY;
 
     loop {
         let artifact_json = downloader.download_to_string(artifact_url).await?;
-        let attestation = parse_attestation_payload(&artifact_json)?;
-        let missing = missing_attestation_bins(bins, &attestation.hashes)?;
+        let payload = parse_attestation_payload(&artifact_json)?;
+        let missing = missing_attestation_bins(bins, &payload.hashes)?;
 
         if missing.is_empty() {
-            return Ok(attestation.hashes);
+            let verification_digest = payload
+                .verification_digest
+                .as_deref()
+                .ok_or_else(|| eyre::eyre!("attestation payload has no SHA-256 subject digest"))?;
+            verify_attestation_bundle(&artifact_json, verification_digest, repo, tag)?;
+            return Ok(ReleaseAttestation { hashes: payload.hashes });
         }
 
         if attempt == max_attempts {
             bail!(
                 "attestation for {tag} is missing SHA-256 hashes for {} after {max_attempts} attempts; available subjects: {}",
                 missing.join(", "),
-                format_subjects(&attestation.subjects)
+                format_subjects(&payload.subjects)
             );
         }
 
@@ -468,9 +508,11 @@ async fn download_attestation_hashes(
     }
 }
 
+#[derive(Debug)]
 struct AttestationPayload {
     hashes: HashMap<String, String>,
     subjects: Vec<String>,
+    verification_digest: Option<String>,
 }
 
 fn parse_attestation_payload(json: &str) -> Result<AttestationPayload> {
@@ -482,6 +524,13 @@ fn parse_attestation_payload(json: &str) -> Result<AttestationPayload> {
     let payload_bytes =
         base64::Engine::decode(&base64::engine::general_purpose::STANDARD, payload_b64)?;
     let payload_json: serde_json::Value = serde_json::from_slice(&payload_bytes)?;
+
+    if payload_json["_type"] != "https://in-toto.io/Statement/v1" {
+        bail!("attestation payload is not an in-toto Statement v1");
+    }
+    if payload_json["predicateType"] != "https://slsa.dev/provenance/v1" {
+        bail!("attestation payload is not SLSA provenance v1");
+    }
 
     let mut hashes = HashMap::new();
     let mut subjects = Vec::new();
@@ -498,7 +547,44 @@ fn parse_attestation_payload(json: &str) -> Result<AttestationPayload> {
         }
     }
 
-    Ok(AttestationPayload { hashes, subjects })
+    let verification_digest = payload_json["subject"]
+        .as_array()
+        .and_then(|subjects| {
+            subjects.iter().find_map(|subject| subject["digest"]["sha256"].as_str())
+        })
+        .map(str::to_string);
+
+    Ok(AttestationPayload { hashes, subjects, verification_digest })
+}
+
+fn verify_attestation_bundle(
+    bundle_json: &str,
+    subject_digest: &str,
+    repo: &str,
+    tag: &str,
+) -> Result<()> {
+    let bundle = Bundle::from_json(bundle_json).wrap_err("failed to parse Sigstore bundle")?;
+    let digest = Sha256Hash::from_hex(subject_digest)
+        .wrap_err("attestation contains an invalid SHA-256 digest")?;
+    let trusted_root = TrustedRoot::from_json(SIGSTORE_PRODUCTION_TRUSTED_ROOT)
+        .wrap_err("failed to load the Sigstore public-good trust root")?;
+    let policy = VerificationPolicy::default()
+        .require_identity(release_workflow_identity(repo, tag))
+        .require_issuer(GITHUB_ACTIONS_ISSUER);
+
+    sigstore_verify::verify(digest, &bundle, &policy, &trusted_root)
+        .wrap_err("Sigstore bundle verification failed")?;
+    say!("Sigstore bundle verified ✓");
+    Ok(())
+}
+
+fn release_workflow_identity(repo: &str, tag: &str) -> String {
+    let git_ref = if tag == "nightly" || tag.starts_with("nightly-") {
+        "refs/heads/master".to_string()
+    } else {
+        format!("refs/tags/{tag}")
+    };
+    format!("https://github.com/{repo}/{RELEASE_WORKFLOW}@{git_ref}")
 }
 
 fn expected_hash<'a>(
@@ -1761,6 +1847,23 @@ mod tests {
         let attestation = parse_attestation_payload(s).unwrap();
         assert!(!attestation.hashes.is_empty());
         assert!(attestation.hashes.contains_key("forge"));
+
+        let digest = attestation.verification_digest.as_deref().unwrap();
+        verify_attestation_bundle(s, digest, "foundry-rs/foundry", "stable").unwrap();
+
+        let err = verify_attestation_bundle(s, digest, "attacker/foundry", "stable").unwrap_err();
+        assert!(err.to_string().contains("Sigstore bundle verification failed"));
+
+        let mut tampered: serde_json::Value = serde_json::from_str(s).unwrap();
+        tampered["dsseEnvelope"]["signatures"][0]["sig"] = "AAAA".into();
+        let err = verify_attestation_bundle(
+            &tampered.to_string(),
+            digest,
+            "foundry-rs/foundry",
+            "stable",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Sigstore bundle verification failed"));
     }
 
     #[test]
@@ -1826,9 +1929,63 @@ mod tests {
     }
 
     fn attestation_json(subjects: serde_json::Value) -> String {
-        let payload = serde_json::json!({ "subject": subjects }).to_string();
+        let payload = serde_json::json!({
+            "_type": "https://in-toto.io/Statement/v1",
+            "subject": subjects,
+            "predicateType": "https://slsa.dev/provenance/v1",
+            "predicate": {}
+        })
+        .to_string();
         let payload = base64::engine::general_purpose::STANDARD.encode(payload);
         serde_json::json!({ "dsseEnvelope": { "payload": payload } }).to_string()
+    }
+
+    #[test]
+    fn attestations_are_required_from_first_attested_release() {
+        assert!(!attestation_required("v1.2.3"));
+        assert!(!attestation_required("v1.3.0-alpha"));
+        assert!(attestation_required("v1.3.0-rc1"));
+        assert!(attestation_required("v1.3.0"));
+        assert!(attestation_required("v1.8.1"));
+        assert!(attestation_required("nightly"));
+        assert!(attestation_required("nightly-deadbeef"));
+        assert!(!attestation_required("feature-branch"));
+    }
+
+    #[test]
+    fn attestation_identity_is_pinned_to_release_workflow_and_tag() {
+        assert_eq!(
+            release_workflow_identity("foundry-rs/foundry", "v1.8.1"),
+            "https://github.com/foundry-rs/foundry/.github/workflows/release.yml@refs/tags/v1.8.1"
+        );
+        assert_eq!(
+            release_workflow_identity("foundry-rs/foundry", "nightly-deadbeef"),
+            "https://github.com/foundry-rs/foundry/.github/workflows/release.yml@refs/heads/master"
+        );
+    }
+
+    #[test]
+    fn attestation_rejects_non_slsa_predicate() {
+        let payload = serde_json::json!({
+            "_type": "https://in-toto.io/Statement/v1",
+            "subject": [{ "name": "forge", "digest": { "sha256": "abc" } }],
+            "predicateType": "https://example.com/not-slsa",
+            "predicate": {}
+        })
+        .to_string();
+        let payload = base64::engine::general_purpose::STANDARD.encode(payload);
+        let bundle = serde_json::json!({ "dsseEnvelope": { "payload": payload } }).to_string();
+
+        let err = parse_attestation_payload(&bundle).unwrap_err();
+        assert_eq!(err.to_string(), "attestation payload is not SLSA provenance v1");
+    }
+
+    #[test]
+    fn missing_required_attestation_fails_closed() {
+        let err = missing_attestation("v1.3.0-rc1").unwrap_err();
+        assert!(err.to_string().contains("refusing to download unverified binaries"));
+
+        assert!(matches!(missing_attestation("v1.2.3").unwrap(), PrebuiltCheck::Download(None)));
     }
 
     fn test_config(foundry_dir: &Path) -> Config {

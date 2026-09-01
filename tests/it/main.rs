@@ -79,7 +79,7 @@ Options:
           Cargo features to enable for building
 
   -f, --force
-          Skip SHA verification (INSECURE)
+          Skip Sigstore and SHA verification (INSECURE)
 
       --arch <ARCH>
           Install a specific architecture (amd64, arm64)

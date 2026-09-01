@@ -14,6 +14,12 @@ foundryup
 
 See [**The Foundry Book**](https://getfoundry.sh/) for documentation on installing and using *foundryup*.
 
+## Release verification
+
+Prebuilt releases from `v1.3.0-rc1` onward require a valid Sigstore bundle signed by the
+`foundry-rs/foundry` release workflow. Branch, pull request, commit, and local installs are built
+from source instead. Passing `--force` explicitly disables release verification.
+
 ## Getting help
 
 See [**Getting help**](https://github.com/foundry-rs/foundry#getting-help)

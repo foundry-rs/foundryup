@@ -70,7 +70,7 @@ pub(crate) struct Cli {
     #[arg(short = 'n', long, hide = true, env = "FOUNDRYUP_NETWORK", hide_env = true)]
     pub network: Option<String>,
 
-    /// Skip SHA verification (INSECURE)
+    /// Skip Sigstore and SHA verification (INSECURE)
     #[arg(short = 'f', long)]
     pub force: bool,
 
