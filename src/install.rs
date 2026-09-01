@@ -87,8 +87,16 @@ async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
         PrebuiltCheck::Download(attestation) => attestation,
     };
 
+    let archive_name = archive_name(config, &version, &target);
+    let archive_hash = attestation
+        .as_ref()
+        .map(|attestation| expected_hash(&attestation.hashes, &archive_name, &archive_name))
+        .transpose()?
+        .flatten()
+        .map(String::as_str);
     let extracted =
-        download_and_extract(config, &downloader, &release_url, &version, &target).await?;
+        download_and_extract(&downloader, &release_url, &archive_name, &target, archive_hash)
+            .await?;
 
     if let Some(ref attestation) = attestation {
         verify_binaries(config, &extracted.path, &attestation.hashes)?;
@@ -452,7 +460,9 @@ fn attestation_required(tag: &str) -> bool {
     }
 
     let Some(version) = tag.strip_prefix('v').and_then(|tag| Version::parse(tag).ok()) else {
-        return false;
+        // Only recognized legacy semver tags are grandfathered. Unknown tag
+        // formats must fail closed instead of silently skipping verification.
+        return true;
     };
     version >= Version::parse(FIRST_ATTESTED_VERSION).expect("valid attestation cutoff")
 }
@@ -484,6 +494,7 @@ async fn download_attestation(
                 .as_deref()
                 .ok_or_else(|| eyre::eyre!("attestation payload has no SHA-256 subject digest"))?;
             verify_attestation_bundle(&artifact_json, verification_digest, repo, tag)?;
+            verify_nightly_source_commit(&payload, repo, tag)?;
             return Ok(ReleaseAttestation { hashes: payload.hashes });
         }
 
@@ -513,6 +524,7 @@ struct AttestationPayload {
     hashes: HashMap<String, String>,
     subjects: Vec<String>,
     verification_digest: Option<String>,
+    source_dependencies: Vec<(String, String)>,
 }
 
 fn parse_attestation_payload(json: &str) -> Result<AttestationPayload> {
@@ -554,7 +566,20 @@ fn parse_attestation_payload(json: &str) -> Result<AttestationPayload> {
         })
         .map(str::to_string);
 
-    Ok(AttestationPayload { hashes, subjects, verification_digest })
+    let source_dependencies = payload_json
+        .pointer("/predicate/buildDefinition/resolvedDependencies")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|dependency| {
+            Some((
+                dependency["uri"].as_str()?.to_string(),
+                dependency["digest"]["gitCommit"].as_str()?.to_string(),
+            ))
+        })
+        .collect();
+
+    Ok(AttestationPayload { hashes, subjects, verification_digest, source_dependencies })
 }
 
 fn verify_attestation_bundle(
@@ -575,6 +600,25 @@ fn verify_attestation_bundle(
     sigstore_verify::verify(digest, &bundle, &policy, &trusted_root)
         .wrap_err("Sigstore bundle verification failed")?;
     say!("Sigstore bundle verified ✓");
+    Ok(())
+}
+
+fn verify_nightly_source_commit(payload: &AttestationPayload, repo: &str, tag: &str) -> Result<()> {
+    let Some(expected_commit) = tag.strip_prefix("nightly-") else {
+        return Ok(());
+    };
+    if expected_commit.len() != 40 || !expected_commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("nightly tag {tag} does not contain a full Git commit");
+    }
+
+    let expected_uri = format!("git+https://github.com/{repo}@refs/heads/master");
+    if !payload
+        .source_dependencies
+        .iter()
+        .any(|(uri, commit)| uri == &expected_uri && commit.eq_ignore_ascii_case(expected_commit))
+    {
+        bail!("attestation source commit does not match nightly tag {tag}");
+    }
     Ok(())
 }
 
@@ -702,23 +746,30 @@ fn archive_name(config: &Config, version: &str, target: &Target) -> String {
 }
 
 async fn download_and_extract(
-    config: &Config,
     downloader: &Downloader,
     release_url: &str,
-    version: &str,
+    archive_name: &str,
     target: &Target,
+    expected_archive_hash: Option<&str>,
 ) -> Result<ExtractedArchive> {
-    let archive_name = archive_name(config, version, target);
-
     let archive_url = format!("{release_url}{archive_name}");
     say!("downloading {archive_name}");
 
     let temp_dir = tempfile::tempdir()?;
-    let archive_path = temp_dir.path().join(&archive_name);
+    let archive_path = temp_dir.path().join(archive_name);
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir)?;
 
     downloader.download_to_file(&archive_url, &archive_path).await?;
+
+    if let Some(expected) = expected_archive_hash {
+        let actual = compute_sha256(&archive_path)
+            .wrap_err("could not calculate SHA-256 hash for downloaded archive")?;
+        if actual != expected {
+            bail!("archive hash verification failed: expected {expected}, got {actual}");
+        }
+        say!("{archive_name} verified ✓");
+    }
 
     if target.platform == Platform::Win32 {
         extract_zip(&archive_path, &extract_dir)?;
@@ -1929,11 +1980,18 @@ mod tests {
     }
 
     fn attestation_json(subjects: serde_json::Value) -> String {
+        attestation_json_with_predicate(subjects, serde_json::json!({}))
+    }
+
+    fn attestation_json_with_predicate(
+        subjects: serde_json::Value,
+        predicate: serde_json::Value,
+    ) -> String {
         let payload = serde_json::json!({
             "_type": "https://in-toto.io/Statement/v1",
             "subject": subjects,
             "predicateType": "https://slsa.dev/provenance/v1",
-            "predicate": {}
+            "predicate": predicate
         })
         .to_string();
         let payload = base64::engine::general_purpose::STANDARD.encode(payload);
@@ -1949,7 +2007,8 @@ mod tests {
         assert!(attestation_required("v1.8.1"));
         assert!(attestation_required("nightly"));
         assert!(attestation_required("nightly-deadbeef"));
-        assert!(!attestation_required("feature-branch"));
+        assert!(attestation_required("v1.8.1.not-semver"));
+        assert!(attestation_required("feature-branch"));
     }
 
     #[test]
@@ -1978,6 +2037,37 @@ mod tests {
 
         let err = parse_attestation_payload(&bundle).unwrap_err();
         assert_eq!(err.to_string(), "attestation payload is not SLSA provenance v1");
+    }
+
+    #[test]
+    fn nightly_attestation_is_bound_to_tag_commit() {
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let bundle = attestation_json_with_predicate(
+            serde_json::json!([{
+                "name": "forge",
+                "digest": { "sha256": "abc" }
+            }]),
+            serde_json::json!({
+                "buildDefinition": {
+                    "resolvedDependencies": [{
+                        "uri": "git+https://github.com/foundry-rs/foundry@refs/heads/master",
+                        "digest": { "gitCommit": commit }
+                    }]
+                }
+            }),
+        );
+
+        let payload = parse_attestation_payload(&bundle).unwrap();
+        verify_nightly_source_commit(&payload, "foundry-rs/foundry", &format!("nightly-{commit}"))
+            .unwrap();
+
+        let err = verify_nightly_source_commit(
+            &payload,
+            "foundry-rs/foundry",
+            "nightly-ffffffffffffffffffffffffffffffffffffffff",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("does not match nightly tag"));
     }
 
     #[test]
