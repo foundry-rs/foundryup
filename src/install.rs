@@ -1505,7 +1505,12 @@ fn is_executable(path: &Path) -> bool {
 fn get_bin_version(path: &Path) -> Result<String> {
     let output = std::process::Command::new(path).arg("-V").output()?;
     if !output.status.success() {
-        bail!("`{} -V` exited with {}", path.display(), output.status);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            bail!("`{} -V` exited with {}", path.display(), output.status);
+        }
+        bail!("`{} -V` exited with {}:\n{stderr}", path.display(), output.status);
     }
     let version = String::from_utf8_lossy(&output.stdout);
     Ok(version.trim().to_string())
@@ -2112,6 +2117,21 @@ mod tests {
             }
         }
         hashes
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_binary_version_includes_stderr() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("forge");
+        write_executable(
+            &bin,
+            b"#!/bin/sh\nprintf '%s\\n' 'dyld: Library not loaded: libusb-1.0.0.dylib' >&2\nexit 1\n",
+        );
+
+        let err = get_bin_version(&bin).unwrap_err().to_string();
+        assert!(err.contains("exited with exit status: 1"));
+        assert!(err.contains("dyld: Library not loaded: libusb-1.0.0.dylib"));
     }
 
     #[test]
