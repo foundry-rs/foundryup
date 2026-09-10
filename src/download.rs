@@ -7,6 +7,19 @@ use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 use std::{future::Future, io::Write, path::Path};
 
+/// Explicitly opt a validation failure into the download's existing retry budget.
+/// All other validation errors are permanent.
+#[derive(Debug)]
+pub(crate) struct RetryableValidationError(pub(crate) String);
+
+impl std::fmt::Display for RetryableValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RetryableValidationError {}
+
 /// Transient HTTP statuses that may recover on retry (e.g. GitHub rate limiting
 /// or temporary outages). Other errors (e.g. 404) are treated as permanent.
 fn is_retryable_status(status: reqwest::StatusCode) -> bool {
@@ -66,7 +79,7 @@ impl Downloader {
         Ok(Self { client, max_retries: max_retries() })
     }
 
-    /// One retry budget covers both the request and consumption of its response body.
+    /// One retry budget covers the request, response body and optional validation.
     async fn request<T, F, Fut>(&self, method: reqwest::Method, url: &str, consume: F) -> Result<T>
     where
         F: Fn(reqwest::Response) -> Fut,
@@ -97,9 +110,10 @@ impl Downloader {
             },
             |error: &eyre::Report| {
                 retryable_host
-                    && error
-                        .downcast_ref::<reqwest::Error>()
-                        .is_some_and(|error| error.status().is_none_or(is_retryable_status))
+                    && (error.is::<RetryableValidationError>()
+                        || error
+                            .downcast_ref::<reqwest::Error>()
+                            .is_some_and(|error| error.status().is_none_or(is_retryable_status)))
             },
         )
         .await
@@ -161,8 +175,22 @@ impl Downloader {
     }
 
     pub(crate) async fn download_to_string(&self, url: &str) -> Result<String> {
+        self.download_and_validate(url, Ok).await
+    }
+
+    /// Validate within the HTTP retry loop, so transient validation errors do not
+    /// create a second retry budget. Mark those errors with `RetryableValidationError`.
+    pub(crate) async fn download_and_validate<T>(
+        &self,
+        url: &str,
+        validate: impl Fn(String) -> Result<T>,
+    ) -> Result<T> {
         self.request(reqwest::Method::GET, url, |response| async {
-            successful_response(response)?.text().await.wrap_err("failed to read response body")
+            let body = successful_response(response)?
+                .text()
+                .await
+                .wrap_err("failed to read response body")?;
+            validate(body)
         })
         .await
     }
@@ -386,6 +414,55 @@ mod tests {
             let (downloader, url, server) = fixture(vec![UNAVAILABLE, PARTIAL], 1);
             let error = downloader.download_to_string(&url).await.unwrap_err();
             assert!(error.downcast_ref::<reqwest::Error>().unwrap().status().is_none());
+            server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn http_body_and_validation_failures_share_one_budget() {
+        run_test(async {
+            let (downloader, url, server) =
+                fixture(vec![UNAVAILABLE, PARTIAL, OK, UNAVAILABLE, PARTIAL, OK], 5);
+            let validations = std::cell::Cell::new(0);
+            let error = downloader
+                .download_and_validate(&url, |_| {
+                    validations.set(validations.get() + 1);
+                    Err::<(), _>(RetryableValidationError("missing hashes".into()).into())
+                })
+                .await
+                .unwrap_err();
+            assert!(error.is::<RetryableValidationError>());
+            assert_eq!(validations.get(), 2);
+            server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn validation_can_recover_but_permanent_failures_stop_immediately() {
+        run_test(async {
+            let (downloader, url, server) = fixture(vec![UNAVAILABLE, PARTIAL, OK, OK], 3);
+            let validations = std::cell::Cell::new(0);
+            let body = downloader
+                .download_and_validate(&url, |body| {
+                    validations.set(validations.get() + 1);
+                    if validations.get() == 1 {
+                        Err(RetryableValidationError("missing hashes".into()).into())
+                    } else {
+                        Ok(body)
+                    }
+                })
+                .await
+                .unwrap();
+            assert_eq!(body, "ok");
+            assert_eq!(validations.get(), 2);
+            server.await.unwrap();
+
+            let (downloader, url, server) = fixture(vec![OK], 5);
+            let error = downloader
+                .download_and_validate::<()>(&url, |_| eyre::bail!("invalid signature"))
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("invalid signature"));
             server.await.unwrap();
         });
     }

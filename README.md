@@ -28,7 +28,9 @@ and response-body failures up to five times, waiting
 retry count, or `0` to disable retries; delays remain capped at 16 seconds. A failed
 attestation download still aborts installation. Each retry restarts the entire download;
 partial files are overwritten. Permanent HTTP failures such as 404 and local file I/O
-errors are not retried. Incomplete attestations use the same backoff policy. Git and
+errors are not retried. HTTP failures, interrupted bodies, and incomplete attestations
+share one retry budget: by default, at most six attempts and 31 seconds of backoff
+per download, excluding time spent making requests. Git and
 Cargo manage their own network operations during source builds.
 
 ## Getting help

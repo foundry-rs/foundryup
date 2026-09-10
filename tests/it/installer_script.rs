@@ -384,6 +384,26 @@ fn script_optional_404_is_not_retried_but_exhausted_errors_are_fatal() {
 }
 
 #[test]
+fn script_local_io_failure_is_permanent_even_with_retryable_http_status() {
+    for (backend, status) in [("curl", 23), ("wget", 3)] {
+        let output = run_script_function(&format!(
+            r#"
+check_cmd() {{ [ "$1" = '{backend}' ]; }}
+curl() {{ printf 503; return 23; }}
+wget() {{ printf '  HTTP/1.1 503 Unavailable\n' >&2; return 3; }}
+sleep() {{ exit 99; }}
+if try_download https://github.com/foundry-rs/foundryup/file unused; then
+    exit 98
+else
+    [ "$?" = {status} ] || exit 97
+fi
+"#
+        ));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+#[test]
 fn script_ensure_success() {
     let output = run_script_function("ensure true && echo 'ok'");
     assert!(output.status.success());

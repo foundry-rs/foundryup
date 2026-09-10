@@ -1,9 +1,8 @@
 use crate::{
     cli::Cli,
     config::{Bin, Config},
-    download::{Downloader, compute_sha256, extract_tar_gz, extract_zip},
+    download::{Downloader, RetryableValidationError, compute_sha256, extract_tar_gz, extract_zip},
     platform::{Platform, Target},
-    retry::{max_retries, retry},
     say, tell, warn,
 };
 use eyre::{Result, WrapErr, bail};
@@ -467,18 +466,6 @@ struct ReleaseAttestation {
     hashes: HashMap<String, String>,
 }
 
-/// A stale attestation may omit newly published binaries; verification failures are permanent.
-#[derive(Debug)]
-struct IncompleteAttestation(String);
-
-impl std::fmt::Display for IncompleteAttestation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for IncompleteAttestation {}
-
 async fn download_attestation(
     downloader: &Downloader,
     artifact_url: &str,
@@ -486,33 +473,36 @@ async fn download_attestation(
     repo: &str,
     tag: &str,
 ) -> Result<ReleaseAttestation> {
-    retry(
-        max_retries(),
-        || async {
-            let artifact_json = downloader.download_to_string(artifact_url).await?;
-            let payload = parse_attestation_payload(&artifact_json)?;
-            let missing = missing_attestation_bins(bins, &payload.hashes)?;
+    downloader
+        .download_and_validate(artifact_url, |artifact_json| {
+            validate_attestation(&artifact_json, bins, repo, tag)
+        })
+        .await
+}
 
-            if missing.is_empty() {
-                let verification_digest =
-                    payload.verification_digest.as_deref().ok_or_else(|| {
-                        eyre::eyre!("attestation payload has no SHA-256 subject digest")
-                    })?;
-                verify_attestation_bundle(&artifact_json, verification_digest, repo, tag)?;
-                verify_nightly_source_commit(&payload, repo, tag)?;
-                return Ok(ReleaseAttestation { hashes: payload.hashes });
-            }
-
-            Err(IncompleteAttestation(format!(
-                "attestation for {tag} is missing SHA-256 hashes for {}; available subjects: {}",
-                missing.join(", "),
-                format_subjects(&payload.subjects)
-            ))
-            .into())
-        },
-        |error: &eyre::Report| error.is::<IncompleteAttestation>(),
-    )
-    .await
+fn validate_attestation(
+    artifact_json: &str,
+    bins: &[Bin],
+    repo: &str,
+    tag: &str,
+) -> Result<ReleaseAttestation> {
+    let payload = parse_attestation_payload(artifact_json)?;
+    let missing = missing_attestation_bins(bins, &payload.hashes)?;
+    if !missing.is_empty() {
+        return Err(RetryableValidationError(format!(
+            "attestation for {tag} is missing SHA-256 hashes for {}; available subjects: {}",
+            missing.join(", "),
+            format_subjects(&payload.subjects)
+        ))
+        .into());
+    }
+    let verification_digest = payload
+        .verification_digest
+        .as_deref()
+        .ok_or_else(|| eyre::eyre!("attestation payload has no SHA-256 subject digest"))?;
+    verify_attestation_bundle(artifact_json, verification_digest, repo, tag)?;
+    verify_nightly_source_commit(&payload, repo, tag)?;
+    Ok(ReleaseAttestation { hashes: payload.hashes })
 }
 
 #[derive(Debug)]
@@ -1982,6 +1972,24 @@ mod tests {
 
     fn attestation_json(subjects: serde_json::Value) -> String {
         attestation_json_with_predicate(subjects, serde_json::json!({}))
+    }
+
+    #[test]
+    fn attestation_validation_retries_only_missing_hashes() {
+        let bins = [Bin { name: "forge", optional: false }];
+        let validate =
+            |json: &str| validate_attestation(json, &bins, "foundry-rs/foundry", "v1.8.1");
+        let incomplete = attestation_json(serde_json::json!([]));
+        assert!(validate(&incomplete).unwrap_err().is::<RetryableValidationError>());
+
+        let malformed = validate("not JSON").unwrap_err();
+        assert!(!malformed.is::<RetryableValidationError>());
+        let unsigned = attestation_json(serde_json::json!([
+            { "name": "forge", "digest": { "sha256": "00".repeat(32) } }
+        ]));
+        let invalid = validate(&unsigned).unwrap_err();
+        assert!(!invalid.is::<RetryableValidationError>());
+        assert!(format!("{invalid:#}").contains("Sigstore"));
     }
 
     fn attestation_json_with_predicate(

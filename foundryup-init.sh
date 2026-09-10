@@ -389,12 +389,14 @@ try_download() {
         fi
         RETVAL="$_http_status"
         _retryable=false
-        case "$_http_status" in
-            403|408|429|500|502|503|504) _retryable=true ;;
-        esac
         case "$_dld:$_status" in
+            curl:22|wget:8)
+                case "$_http_status" in
+                    403|408|429|500|502|503|504) _retryable=true ;;
+                esac
+                ;;
             # curl setup/local I/O errors and permanent HTTP errors are not transient.
-            curl:1|curl:2|curl:3|curl:4|curl:22|curl:23|curl:26|curl:27) ;;
+            curl:1|curl:2|curl:3|curl:4|curl:23|curl:26|curl:27) ;;
             curl:*|wget:4|wget:5) _retryable=true ;;
         esac
         case "$_host" in
