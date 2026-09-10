@@ -67,6 +67,7 @@ All other options are passed to foundryup after installation.
 Environment variables:
   FOUNDRYUP_VERSION              Install a specific version of foundryup
   FOUNDRYUP_IGNORE_VERIFICATION  Skip attestation verification if set to "true"
+  FOUNDRYUP_MAX_RETRIES          Retries after a failed download (default: 5)
 
 "#]]
     );
@@ -105,6 +106,7 @@ All other options are passed to foundryup after installation.
 Environment variables:
   FOUNDRYUP_VERSION              Install a specific version of foundryup
   FOUNDRYUP_IGNORE_VERIFICATION  Skip attestation verification if set to "true"
+  FOUNDRYUP_MAX_RETRIES          Retries after a failed download (default: 5)
 
 "#]]
     );
@@ -264,6 +266,141 @@ fn script_downloader_check() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_data_eq!(stdout.as_ref(), "ok\n");
+}
+
+fn mock_download_script(
+    backend: &str,
+    code: u16,
+    failures: usize,
+    retries: &str,
+    operation: &str,
+) -> std::process::Output {
+    run_script_function(&format!(
+        r#"
+fixture_dir=$(mktemp -d)
+trap 'rm -f "$fixture_dir/count" "$fixture_dir/body"; rmdir "$fixture_dir"' EXIT
+printf 0 > "$fixture_dir/count"
+FOUNDRYUP_MAX_RETRIES='{retries}'
+check_cmd() {{ [ "$1" = '{backend}' ]; }}
+sleep() {{ printf 'sleep:%s\n' "$1"; }}
+mock_download() {{
+    backend="$1"
+    shift
+    output=''
+    one_try=false
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --output|-O) shift; output="$1" ;;
+            --tries=1) one_try=true ;;
+        esac
+        shift
+    done
+    if [ "$backend" = wget ] && [ "$one_try" = false ]; then exit 99; fi
+    count=$(($(cat "$fixture_dir/count") + 1))
+    printf '%s' "$count" > "$fixture_dir/count"
+    if [ "$count" -le {failures} ]; then
+        printf 'stale partial body' > "$output"
+        if [ "$backend" = curl ]; then
+            printf '{code}'
+            case '{code}' in 200) return 18 ;; 0|000) return 7 ;; *) return 22 ;; esac
+        fi
+        printf '  HTTP/1.1 302 Found\n  HTTP/1.1 {code} Error\n' >&2
+        case '{code}' in 200|0|000) return 4 ;; *) return 8 ;; esac
+    fi
+    printf 'ok' > "$output"
+    if [ "$backend" = curl ]; then printf 200; fi
+}}
+curl() {{ mock_download curl "$@"; }}
+wget() {{ mock_download wget "$@"; }}
+if {operation} https://github.com/foundry-rs/foundryup/file "$fixture_dir/body" linux; then
+    printf 'success:'
+    cat "$fixture_dir/body"
+    printf '\n'
+else
+    printf 'failure:%s\n' "$RETVAL"
+fi
+printf 'calls:'
+cat "$fixture_dir/count"
+printf '\n'
+"#
+    ))
+}
+
+#[test]
+fn script_downloads_share_backoff_and_retry_partial_bodies() {
+    for backend in ["curl", "wget"] {
+        for operation in ["downloader", "download_optional"] {
+            for code in [0, 200, 403, 408, 429, 500, 502, 503, 504] {
+                let output = mock_download_script(backend, code, 2, "2", operation);
+                assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stdout),
+                    "sleep:1\nsleep:2\nsuccess:ok\ncalls:3\n"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn script_retry_budget_defaults_and_delay_cap() {
+    for backend in ["curl", "wget"] {
+        for (retries, expected) in [
+            (
+                "7",
+                "sleep:1\nsleep:2\nsleep:4\nsleep:8\nsleep:16\nsleep:16\nsleep:16\nfailure:503\ncalls:8\n",
+            ),
+            ("invalid", "sleep:1\nsleep:2\nsleep:4\nsleep:8\nsleep:16\nfailure:503\ncalls:6\n"),
+            ("4294967296", "sleep:1\nsleep:2\nsleep:4\nsleep:8\nsleep:16\nfailure:503\ncalls:6\n"),
+            ("0", "failure:503\ncalls:1\n"),
+            (" +02 ", "sleep:1\nsleep:2\nfailure:503\ncalls:3\n"),
+        ] {
+            let output = mock_download_script(backend, 503, 10, retries, "try_download");
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+        }
+    }
+}
+
+#[test]
+fn script_optional_404_is_not_retried_but_exhausted_errors_are_fatal() {
+    for backend in ["curl", "wget"] {
+        let output = mock_download_script(backend, 404, 10, "5", "download_optional");
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "failure:404\ncalls:1\n");
+        for code in [400, 401, 410] {
+            let output = mock_download_script(backend, code, 10, "5", "try_download");
+            assert!(output.status.success());
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                format!("failure:{code}\ncalls:1\n")
+            );
+        }
+        let output = mock_download_script(backend, 503, 10, "1", "download_optional");
+        assert!(!output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "sleep:1\n");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("failed to download"));
+    }
+}
+
+#[test]
+fn script_local_io_failure_is_permanent_even_with_retryable_http_status() {
+    for (backend, status) in [("curl", 23), ("wget", 3)] {
+        let output = run_script_function(&format!(
+            r#"
+check_cmd() {{ [ "$1" = '{backend}' ]; }}
+curl() {{ printf 503; return 23; }}
+wget() {{ printf '  HTTP/1.1 503 Unavailable\n' >&2; return 3; }}
+sleep() {{ exit 99; }}
+if try_download https://github.com/foundry-rs/foundryup/file unused; then
+    exit 98
+else
+    [ "$?" = {status} ] || exit 97
+fi
+"#
+        ));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
 }
 
 #[test]

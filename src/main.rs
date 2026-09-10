@@ -18,6 +18,7 @@ mod download;
 mod install;
 mod platform;
 mod process;
+mod retry;
 mod self_update;
 
 use cli::Cli;
