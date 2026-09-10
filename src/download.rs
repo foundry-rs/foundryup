@@ -10,11 +10,6 @@ use std::{io::Write, path::Path, time::Duration};
 /// failures, used when `FOUNDRYUP_MAX_RETRIES` is unset or unparsable.
 const DEFAULT_MAX_RETRIES: u32 = 5;
 
-// Start with one second to let transient failures recover; cap the delay so custom
-// retry counts do not cause exponentially growing waits.
-const RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
-const RETRY_MAX_DELAY: Duration = Duration::from_secs(16);
-
 /// Number of retries for transient HTTP failures, honoring the
 /// `FOUNDRYUP_MAX_RETRIES` environment variable (matching the install script).
 ///
@@ -96,7 +91,7 @@ impl Downloader {
     ) -> reqwest::Result<reqwest::Response> {
         let request = request.build()?;
         let retryable_host = request.url().host_str().is_some_and(|host| GitHubHosts == host);
-        let mut delay = RETRY_INITIAL_DELAY;
+        let mut delay = Duration::from_secs(1);
         for attempt in 0..=self.max_retries {
             // All callers use bodyless GET or HEAD requests, which can be replayed.
             let result = self.client.execute(request.try_clone().expect("bodyless request")).await;
@@ -116,7 +111,10 @@ impl Downloader {
                 self.max_retries
             );
             tokio::time::sleep(delay).await;
-            delay = delay.saturating_mul(2).min(RETRY_MAX_DELAY);
+            // Cap the delay at the default retry schedule for custom retry counts.
+            if attempt < DEFAULT_MAX_RETRIES - 1 {
+                delay *= 2;
+            }
         }
         unreachable!("the last attempt always returns")
     }
