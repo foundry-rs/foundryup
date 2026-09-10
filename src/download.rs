@@ -4,18 +4,22 @@ use fs_err as fs;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
-use std::{io::Write, path::Path};
+use std::{io::Write, path::Path, time::Duration};
 
 /// Default number of retries (after the initial attempt) for transient HTTP
 /// failures, used when `FOUNDRYUP_MAX_RETRIES` is unset or unparsable.
 const DEFAULT_MAX_RETRIES: u32 = 5;
 
+// Start with one second to let transient failures recover; cap the delay so custom
+// retry counts do not cause exponentially growing waits.
+const RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
+const RETRY_MAX_DELAY: Duration = Duration::from_secs(16);
+
 /// Number of retries for transient HTTP failures, honoring the
 /// `FOUNDRYUP_MAX_RETRIES` environment variable (matching the install script).
 ///
 /// The script's `FOUNDRYUP_RETRY_DELAY` / `FOUNDRYUP_RETRY_MAX_TIME` are not
-/// supported here: reqwest's retry layer manages its own backoff and does not
-/// expose delay or total-time knobs.
+/// supported here: the downloader uses bounded exponential backoff.
 pub(crate) fn max_retries() -> u32 {
     static CACHE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *CACHE.get_or_init(|| {
@@ -71,30 +75,50 @@ fn is_github_api_url(url: &reqwest::Url) -> bool {
 
 pub(crate) struct Downloader {
     client: reqwest::Client,
+    max_retries: u32,
 }
 
 impl Downloader {
     pub(crate) fn new() -> Result<Self> {
-        // `no_budget` disables reqwest's default token budget, which would
-        // otherwise block retries on a CLI that issues only a few requests.
-        let retry = reqwest::retry::for_host(GitHubHosts)
-            .no_budget()
-            .max_retries_per_request(max_retries())
-            .classify_fn(|req_rep| {
-                if req_rep.error().is_some() || req_rep.status().is_some_and(is_retryable_status) {
-                    req_rep.retryable()
-                } else {
-                    req_rep.success()
-                }
-            });
-
         let client = reqwest::Client::builder()
             .https_only(true)
             .user_agent(concat!("foundryup/", env!("CARGO_PKG_VERSION")))
-            .retry(retry)
+            .retry(reqwest::retry::never())
             .build()
             .wrap_err("failed to create HTTP client")?;
-        Ok(Self { client })
+        Ok(Self { client, max_retries: max_retries() })
+    }
+
+    /// Retries GitHub GET and HEAD requests with a delay between attempts.
+    async fn send_request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> reqwest::Result<reqwest::Response> {
+        let request = request.build()?;
+        let retryable_host = request.url().host_str().is_some_and(|host| GitHubHosts == host);
+        let mut delay = RETRY_INITIAL_DELAY;
+        for attempt in 0..=self.max_retries {
+            // All callers use bodyless GET or HEAD requests, which can be replayed.
+            let result = self.client.execute(request.try_clone().expect("bodyless request")).await;
+            let retryable = match &result {
+                Ok(response) => is_retryable_status(response.status()),
+                Err(_) => true,
+            };
+            if !retryable_host || !retryable || attempt == self.max_retries {
+                return result;
+            }
+            // Release the response before waiting; error bodies are not downloaded.
+            drop(result);
+            tracing::warn!(
+                "request failed; retrying in {}s ({}/{})",
+                delay.as_secs(),
+                attempt + 1,
+                self.max_retries
+            );
+            tokio::time::sleep(delay).await;
+            delay = delay.saturating_mul(2).min(RETRY_MAX_DELAY);
+        }
+        unreachable!("the last attempt always returns")
     }
 
     async fn send(&self, url: &str) -> Result<reqwest::Response> {
@@ -108,7 +132,8 @@ impl Downloader {
                 request = request.bearer_auth(token);
             }
         }
-        let response = request.send().await.wrap_err_with(|| format!("failed to GET {url}"))?;
+        let response =
+            self.send_request(request).await.wrap_err_with(|| format!("failed to GET {url}"))?;
         Ok(response)
     }
 
@@ -179,9 +204,7 @@ impl Downloader {
     pub(crate) async fn resolve_redirect_url(&self, url: &str) -> Result<String> {
         let parsed = reqwest::Url::parse(url).wrap_err_with(|| format!("invalid URL {url}"))?;
         let response = self
-            .client
-            .head(parsed)
-            .send()
+            .send_request(self.client.head(parsed))
             .await
             .wrap_err_with(|| format!("failed to HEAD {url}"))?;
         if !response.status().is_success() {
@@ -198,9 +221,7 @@ impl Downloader {
     pub(crate) async fn is_url_available(&self, url: &str) -> Result<bool> {
         let parsed = reqwest::Url::parse(url).wrap_err_with(|| format!("invalid URL {url}"))?;
         let response = self
-            .client
-            .head(parsed)
-            .send()
+            .send_request(self.client.head(parsed))
             .await
             .wrap_err_with(|| format!("failed to HEAD {url}"))?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
@@ -284,7 +305,115 @@ pub(crate) fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::{io::Read, net::TcpListener, thread, time::Instant};
+
     use super::*;
+
+    fn download_responses(
+        statuses: &[u16],
+        max_retries: u32,
+        host: &str,
+        head: bool,
+    ) -> (Result<String>, Vec<Instant>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let statuses = statuses.to_vec();
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            for status in statuses {
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "missing download attempt");
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("accept failed: {error}"),
+                    }
+                };
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                requests.push(Instant::now());
+                assert!(request.starts_with(if head { b"HEAD " } else { b"GET " }));
+                if status == 0 {
+                    continue;
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} Test\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                )
+                .unwrap();
+            }
+            requests
+        });
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(async {
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .resolve(host, address)
+                .retry(reqwest::retry::never())
+                .build()
+                .unwrap();
+            let downloader = Downloader { client, max_retries };
+            let url = format!("http://{host}:{}/attestation", address.port());
+            if head {
+                downloader.resolve_redirect_url(&url).await
+            } else {
+                downloader.download_to_string(&url).await
+            }
+        });
+        (result, server.join().unwrap())
+    }
+
+    #[test]
+    fn download_recovers_with_exponential_backoff() {
+        let (result, requests) = download_responses(&[502, 503, 200], 2, "github.com", false);
+        assert_eq!(result.unwrap(), "ok");
+        assert_eq!(requests.len(), 3);
+        assert!(requests[1].duration_since(requests[0]) >= RETRY_INITIAL_DELAY);
+        assert!(requests[2].duration_since(requests[1]) >= RETRY_INITIAL_DELAY * 2);
+    }
+
+    #[test]
+    fn head_recovers_after_transient_failure() {
+        let (result, requests) = download_responses(&[502, 200], 1, "github.com", true);
+        assert!(result.unwrap().ends_with("/attestation"));
+        assert_eq!(requests.len(), 2);
+    }
+
+    #[test]
+    fn download_recovers_after_connection_closed_without_response() {
+        let (result, requests) = download_responses(&[0, 200], 1, "github.com", false);
+        assert_eq!(result.unwrap(), "ok");
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].duration_since(requests[0]) >= RETRY_INITIAL_DELAY);
+    }
+
+    #[test]
+    fn download_returns_final_error_after_retry_limit() {
+        let (result, requests) = download_responses(&[502, 504], 1, "github.com", false);
+        assert_eq!(requests.len(), 2);
+        assert!(result.unwrap_err().to_string().ends_with("HTTP 504 Gateway Timeout"));
+    }
+
+    #[test]
+    fn download_does_not_retry_permanent_errors_disabled_retries_or_other_hosts() {
+        for (status, retries, host) in
+            [(404, 2, "github.com"), (502, 0, "github.com"), (502, 2, "example.com")]
+        {
+            let (result, requests) = download_responses(&[status], retries, host, false);
+            let status = reqwest::StatusCode::from_u16(status).unwrap();
+            assert!(result.unwrap_err().to_string().ends_with(&format!("HTTP {status}")));
+            assert_eq!(requests.len(), 1);
+        }
+    }
 
     #[test]
     fn retryable_status_classification() {
