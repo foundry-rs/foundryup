@@ -292,33 +292,19 @@ mod tests {
     fn fixture(
         responses: Vec<&'static str>,
         max_retries: u32,
-    ) -> (Downloader, String, std::thread::JoinHandle<()>) {
-        use std::{
-            io::Read,
-            net::TcpListener,
-            time::{Duration, Instant},
-        };
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    ) -> (Downloader, String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
-        let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(10);
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        let server = tokio::spawn(async move {
             for response in responses {
-                let mut stream = loop {
-                    match listener.accept() {
-                        Ok((stream, _)) => break stream,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            assert!(Instant::now() < deadline, "expected another download attempt");
-                            std::thread::sleep(Duration::from_millis(5));
-                        }
-                        Err(error) => panic!("{error}"),
-                    }
-                };
-                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
                 while !request.ends_with(b"\r\n\r\n") {
                     let mut byte = [0];
-                    stream.read_exact(&mut byte).unwrap();
+                    stream.read_exact(&mut byte).await.unwrap();
                     request.push(byte[0]);
                 }
                 assert!(
@@ -326,7 +312,8 @@ mod tests {
                         .to_ascii_lowercase()
                         .contains("authorization:")
                 );
-                stream.write_all(response.as_bytes()).unwrap();
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
             }
         });
         let client = reqwest::Client::builder()
@@ -342,82 +329,90 @@ mod tests {
         )
     }
 
-    fn runtime() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+    fn run_test(test: impl Future<Output = ()>) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap()
+            .block_on(test);
     }
 
     #[test]
     fn file_retries_status_and_partial_body_and_truncates_destination() {
-        let (downloader, url, server) = fixture(vec![UNAVAILABLE, PARTIAL, OK], 2);
-        let file = tempfile::NamedTempFile::new().unwrap();
-        runtime().block_on(downloader.download_to_file(&url, file.path())).unwrap();
-        assert_eq!(fs::read(file.path()).unwrap(), b"ok");
-        server.join().unwrap();
+        run_test(async {
+            let (downloader, url, server) = fixture(vec![UNAVAILABLE, PARTIAL, OK], 2);
+            let file = tempfile::NamedTempFile::new().unwrap();
+            downloader.download_to_file(&url, file.path()).await.unwrap();
+            assert_eq!(fs::read(file.path()).unwrap(), b"ok");
+            server.await.unwrap();
+        });
     }
 
     #[test]
     fn text_and_optional_text_retry_partial_bodies() {
-        for optional in [false, true] {
-            let (downloader, url, server) = fixture(vec![PARTIAL, OK], 1);
-            let text = runtime().block_on(async {
-                if optional {
+        run_test(async {
+            for optional in [false, true] {
+                let (downloader, url, server) = fixture(vec![PARTIAL, OK], 1);
+                let text = if optional {
                     downloader.download_to_string_optional(&url).await.unwrap().unwrap()
                 } else {
                     downloader.download_to_string(&url).await.unwrap()
-                }
-            });
-            assert_eq!(text, "ok");
-            server.join().unwrap();
-        }
+                };
+                assert_eq!(text, "ok");
+                server.await.unwrap();
+            }
+        });
     }
 
     #[test]
     fn head_requests_retry_transient_statuses() {
-        for probe in [false, true] {
-            let (downloader, url, server) = fixture(vec![UNAVAILABLE, OK], 1);
-            runtime().block_on(async {
+        run_test(async {
+            for probe in [false, true] {
+                let (downloader, url, server) = fixture(vec![UNAVAILABLE, OK], 1);
                 if probe {
                     assert!(downloader.is_url_available(&url).await.unwrap());
                 } else {
                     assert_eq!(downloader.resolve_redirect_url(&url).await.unwrap(), url);
                 }
-            });
-            server.join().unwrap();
-        }
+                server.await.unwrap();
+            }
+        });
     }
 
     #[test]
     fn request_and_body_failures_share_one_budget() {
-        let (downloader, url, server) = fixture(vec![UNAVAILABLE, PARTIAL], 1);
-        let error = runtime().block_on(downloader.download_to_string(&url)).unwrap_err();
-        assert!(error.downcast_ref::<reqwest::Error>().unwrap().status().is_none());
-        server.join().unwrap();
+        run_test(async {
+            let (downloader, url, server) = fixture(vec![UNAVAILABLE, PARTIAL], 1);
+            let error = downloader.download_to_string(&url).await.unwrap_err();
+            assert!(error.downcast_ref::<reqwest::Error>().unwrap().status().is_none());
+            server.await.unwrap();
+        });
     }
 
     #[test]
     fn missing_files_remain_optional_and_local_io_errors_are_permanent() {
-        for probe in [false, true] {
-            let (downloader, url, server) = fixture(vec![MISSING], 5);
-            runtime().block_on(async {
+        run_test(async {
+            for probe in [false, true] {
+                let (downloader, url, server) = fixture(vec![MISSING], 5);
                 if probe {
                     assert!(!downloader.is_url_available(&url).await.unwrap());
                 } else {
                     assert_eq!(downloader.download_to_string_optional(&url).await.unwrap(), None);
                 }
-            });
-            server.join().unwrap();
-        }
-        let (downloader, url, server) = fixture(vec![MISSING], 5);
-        let error = runtime().block_on(downloader.download_to_string(&url)).unwrap_err();
-        assert!(format!("{error:#}").contains("404"));
-        server.join().unwrap();
+                server.await.unwrap();
+            }
+            let (downloader, url, server) = fixture(vec![MISSING], 5);
+            let error = downloader.download_to_string(&url).await.unwrap_err();
+            assert!(format!("{error:#}").contains("404"));
+            server.await.unwrap();
 
-        let (downloader, url, server) = fixture(vec![OK], 5);
-        let directory = tempfile::tempdir().unwrap();
-        let error =
-            runtime().block_on(downloader.download_to_file(&url, directory.path())).unwrap_err();
-        assert!(error.downcast_ref::<std::io::Error>().is_some());
-        server.join().unwrap();
+            let (downloader, url, server) = fixture(vec![OK], 5);
+            let directory = tempfile::tempdir().unwrap();
+            let error = downloader.download_to_file(&url, directory.path()).await.unwrap_err();
+            assert!(error.downcast_ref::<std::io::Error>().is_some());
+            server.await.unwrap();
+        });
     }
 
     #[test]

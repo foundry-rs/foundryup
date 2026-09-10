@@ -87,4 +87,4 @@ color-eyre = "0.6.5"
 
 [dev-dependencies]
 snapbox = "1.2"
-tokio = { version = "1", features = ["test-util"] }
+tokio = { version = "1", features = ["test-util", "net"] }
