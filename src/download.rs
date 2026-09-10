@@ -4,7 +4,7 @@ use fs_err as fs;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
-use std::{io::Write, path::Path};
+use std::{io::Write, path::Path, time::Duration};
 
 /// Default number of retries (after the initial attempt) for transient HTTP
 /// failures, used when `FOUNDRYUP_MAX_RETRIES` is unset or unparsable.
@@ -14,8 +14,7 @@ const DEFAULT_MAX_RETRIES: u32 = 5;
 /// `FOUNDRYUP_MAX_RETRIES` environment variable (matching the install script).
 ///
 /// The script's `FOUNDRYUP_RETRY_DELAY` / `FOUNDRYUP_RETRY_MAX_TIME` are not
-/// supported here: reqwest's retry layer manages its own backoff and does not
-/// expose delay or total-time knobs.
+/// supported here: the downloader uses bounded exponential backoff.
 pub(crate) fn max_retries() -> u32 {
     static CACHE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *CACHE.get_or_init(|| {
@@ -71,30 +70,53 @@ fn is_github_api_url(url: &reqwest::Url) -> bool {
 
 pub(crate) struct Downloader {
     client: reqwest::Client,
+    max_retries: u32,
 }
 
 impl Downloader {
     pub(crate) fn new() -> Result<Self> {
-        // `no_budget` disables reqwest's default token budget, which would
-        // otherwise block retries on a CLI that issues only a few requests.
-        let retry = reqwest::retry::for_host(GitHubHosts)
-            .no_budget()
-            .max_retries_per_request(max_retries())
-            .classify_fn(|req_rep| {
-                if req_rep.error().is_some() || req_rep.status().is_some_and(is_retryable_status) {
-                    req_rep.retryable()
-                } else {
-                    req_rep.success()
-                }
-            });
-
         let client = reqwest::Client::builder()
             .https_only(true)
             .user_agent(concat!("foundryup/", env!("CARGO_PKG_VERSION")))
-            .retry(retry)
+            .retry(reqwest::retry::never())
             .build()
             .wrap_err("failed to create HTTP client")?;
-        Ok(Self { client })
+        Ok(Self { client, max_retries: max_retries() })
+    }
+
+    /// Retries GitHub GET and HEAD requests with a delay between attempts.
+    async fn send_request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> reqwest::Result<reqwest::Response> {
+        let request = request.build()?;
+        let retryable_host = request.url().host_str().is_some_and(|host| GitHubHosts == host);
+        let mut delay = Duration::from_secs(1);
+        for attempt in 0..=self.max_retries {
+            // All callers use bodyless GET or HEAD requests, which can be replayed.
+            let result = self.client.execute(request.try_clone().expect("bodyless request")).await;
+            let retryable = match &result {
+                Ok(response) => is_retryable_status(response.status()),
+                Err(_) => true,
+            };
+            if !retryable_host || !retryable || attempt == self.max_retries {
+                return result;
+            }
+            // Release the response before waiting; error bodies are not downloaded.
+            drop(result);
+            tracing::warn!(
+                "request failed; retrying in {}s ({}/{})",
+                delay.as_secs(),
+                attempt + 1,
+                self.max_retries
+            );
+            tokio::time::sleep(delay).await;
+            // Cap the delay at the default retry schedule for custom retry counts.
+            if attempt < DEFAULT_MAX_RETRIES - 1 {
+                delay *= 2;
+            }
+        }
+        unreachable!("the last attempt always returns")
     }
 
     async fn send(&self, url: &str) -> Result<reqwest::Response> {
@@ -108,7 +130,8 @@ impl Downloader {
                 request = request.bearer_auth(token);
             }
         }
-        let response = request.send().await.wrap_err_with(|| format!("failed to GET {url}"))?;
+        let response =
+            self.send_request(request).await.wrap_err_with(|| format!("failed to GET {url}"))?;
         Ok(response)
     }
 
@@ -179,9 +202,7 @@ impl Downloader {
     pub(crate) async fn resolve_redirect_url(&self, url: &str) -> Result<String> {
         let parsed = reqwest::Url::parse(url).wrap_err_with(|| format!("invalid URL {url}"))?;
         let response = self
-            .client
-            .head(parsed)
-            .send()
+            .send_request(self.client.head(parsed))
             .await
             .wrap_err_with(|| format!("failed to HEAD {url}"))?;
         if !response.status().is_success() {
@@ -198,9 +219,7 @@ impl Downloader {
     pub(crate) async fn is_url_available(&self, url: &str) -> Result<bool> {
         let parsed = reqwest::Url::parse(url).wrap_err_with(|| format!("invalid URL {url}"))?;
         let response = self
-            .client
-            .head(parsed)
-            .send()
+            .send_request(self.client.head(parsed))
             .await
             .wrap_err_with(|| format!("failed to HEAD {url}"))?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
