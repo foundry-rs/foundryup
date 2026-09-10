@@ -1,8 +1,9 @@
 use crate::{
     cli::Cli,
     config::{Bin, Config},
-    download::{Downloader, compute_sha256, extract_tar_gz, extract_zip, max_retries},
+    download::{Downloader, compute_sha256, extract_tar_gz, extract_zip},
     platform::{Platform, Target},
+    retry::{max_retries, retry},
     say, tell, warn,
 };
 use eyre::{Result, WrapErr, bail};
@@ -18,7 +19,6 @@ use sigstore_verify::{
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    time::Duration,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -356,11 +356,6 @@ const FIRST_ATTESTED_VERSION: &str = "1.3.0-rc1";
 const GITHUB_ACTIONS_ISSUER: &str = "https://token.actions.githubusercontent.com";
 const RELEASE_WORKFLOW: &str = ".github/workflows/release.yml";
 
-// Missing attestation subjects can come from temporarily stale GitHub/CDN data;
-// keep semantic retries spaced out, but cap the delay so installs fail promptly.
-const ATTESTATION_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
-const ATTESTATION_RETRY_MAX_DELAY: Duration = Duration::from_secs(4);
-
 async fn fetch_and_verify_attestation(
     config: &Config,
     repo: &str,
@@ -472,6 +467,18 @@ struct ReleaseAttestation {
     hashes: HashMap<String, String>,
 }
 
+/// A stale attestation may omit newly published binaries; verification failures are permanent.
+#[derive(Debug)]
+struct IncompleteAttestation(String);
+
+impl std::fmt::Display for IncompleteAttestation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for IncompleteAttestation {}
+
 async fn download_attestation(
     downloader: &Downloader,
     artifact_url: &str,
@@ -479,44 +486,33 @@ async fn download_attestation(
     repo: &str,
     tag: &str,
 ) -> Result<ReleaseAttestation> {
-    let max_attempts = max_retries().saturating_add(1);
-    let mut attempt = 1;
-    let mut retry_delay = ATTESTATION_RETRY_INITIAL_DELAY;
+    retry(
+        max_retries(),
+        || async {
+            let artifact_json = downloader.download_to_string(artifact_url).await?;
+            let payload = parse_attestation_payload(&artifact_json)?;
+            let missing = missing_attestation_bins(bins, &payload.hashes)?;
 
-    loop {
-        let artifact_json = downloader.download_to_string(artifact_url).await?;
-        let payload = parse_attestation_payload(&artifact_json)?;
-        let missing = missing_attestation_bins(bins, &payload.hashes)?;
+            if missing.is_empty() {
+                let verification_digest =
+                    payload.verification_digest.as_deref().ok_or_else(|| {
+                        eyre::eyre!("attestation payload has no SHA-256 subject digest")
+                    })?;
+                verify_attestation_bundle(&artifact_json, verification_digest, repo, tag)?;
+                verify_nightly_source_commit(&payload, repo, tag)?;
+                return Ok(ReleaseAttestation { hashes: payload.hashes });
+            }
 
-        if missing.is_empty() {
-            let verification_digest = payload
-                .verification_digest
-                .as_deref()
-                .ok_or_else(|| eyre::eyre!("attestation payload has no SHA-256 subject digest"))?;
-            verify_attestation_bundle(&artifact_json, verification_digest, repo, tag)?;
-            verify_nightly_source_commit(&payload, repo, tag)?;
-            return Ok(ReleaseAttestation { hashes: payload.hashes });
-        }
-
-        if attempt == max_attempts {
-            bail!(
-                "attestation for {tag} is missing SHA-256 hashes for {} after {max_attempts} attempts; available subjects: {}",
+            Err(IncompleteAttestation(format!(
+                "attestation for {tag} is missing SHA-256 hashes for {}; available subjects: {}",
                 missing.join(", "),
                 format_subjects(&payload.subjects)
-            );
-        }
-
-        let next_attempt = attempt + 1;
-        say!(
-            "attestation for {tag} is missing SHA-256 hashes for {}; retrying attestation download in {}s ({}/{max_attempts})",
-            missing.join(", "),
-            retry_delay.as_secs(),
-            next_attempt
-        );
-        tokio::time::sleep(retry_delay).await;
-        attempt = next_attempt;
-        retry_delay = (retry_delay * 2).min(ATTESTATION_RETRY_MAX_DELAY);
-    }
+            ))
+            .into())
+        },
+        |error: &eyre::Report| error.is::<IncompleteAttestation>(),
+    )
+    .await
 }
 
 #[derive(Debug)]

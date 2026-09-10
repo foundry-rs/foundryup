@@ -1,29 +1,11 @@
+use crate::retry::{max_retries, retry};
 use digest_io::IoWrapper;
 use eyre::{Result, WrapErr, bail};
 use fs_err as fs;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
-use std::{io::Write, path::Path, time::Duration};
-
-/// Default number of retries (after the initial attempt) for transient HTTP
-/// failures, used when `FOUNDRYUP_MAX_RETRIES` is unset or unparsable.
-const DEFAULT_MAX_RETRIES: u32 = 5;
-
-/// Number of retries for transient HTTP failures, honoring the
-/// `FOUNDRYUP_MAX_RETRIES` environment variable (matching the install script).
-///
-/// The script's `FOUNDRYUP_RETRY_DELAY` / `FOUNDRYUP_RETRY_MAX_TIME` are not
-/// supported here: the downloader uses bounded exponential backoff.
-pub(crate) fn max_retries() -> u32 {
-    static CACHE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *CACHE.get_or_init(|| {
-        std::env::var("FOUNDRYUP_MAX_RETRIES")
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(DEFAULT_MAX_RETRIES)
-    })
-}
+use std::{future::Future, io::Write, path::Path};
 
 /// Transient HTTP statuses that may recover on retry (e.g. GitHub rate limiting
 /// or temporary outages). Other errors (e.g. 404) are treated as permanent.
@@ -84,112 +66,105 @@ impl Downloader {
         Ok(Self { client, max_retries: max_retries() })
     }
 
-    /// Retries GitHub GET and HEAD requests with a delay between attempts.
-    async fn send_request(
-        &self,
-        request: reqwest::RequestBuilder,
-    ) -> reqwest::Result<reqwest::Response> {
-        let request = request.build()?;
-        let retryable_host = request.url().host_str().is_some_and(|host| GitHubHosts == host);
-        let mut delay = Duration::from_secs(1);
-        for attempt in 0..=self.max_retries {
-            // All callers use bodyless GET or HEAD requests, which can be replayed.
-            let result = self.client.execute(request.try_clone().expect("bodyless request")).await;
-            let retryable = match &result {
-                Ok(response) => is_retryable_status(response.status()),
-                Err(_) => true,
-            };
-            if !retryable_host || !retryable || attempt == self.max_retries {
-                return result;
-            }
-            // Release the response before waiting; error bodies are not downloaded.
-            drop(result);
-            tracing::warn!(
-                "request failed; retrying in {}s ({}/{})",
-                delay.as_secs(),
-                attempt + 1,
-                self.max_retries
-            );
-            tokio::time::sleep(delay).await;
-            // Cap the delay at the default retry schedule for custom retry counts.
-            if attempt < DEFAULT_MAX_RETRIES - 1 {
-                delay *= 2;
-            }
-        }
-        unreachable!("the last attempt always returns")
-    }
-
-    async fn send(&self, url: &str) -> Result<reqwest::Response> {
+    /// One retry budget covers both the request and consumption of its response body.
+    async fn request<T, F, Fut>(&self, method: reqwest::Method, url: &str, consume: F) -> Result<T>
+    where
+        F: Fn(reqwest::Response) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
         let parsed = reqwest::Url::parse(url).wrap_err_with(|| format!("invalid URL {url}"))?;
-        // Only attach the token to GitHub API requests, never to release-download
-        // CDN hosts. reqwest also strips it on cross-host redirects.
         let is_github_api = is_github_api_url(&parsed);
-        let mut request = self.client.get(parsed);
+        let mut request = self.client.request(method, parsed);
+        // Never attach the token to release downloads or cross-host redirects.
         if is_github_api {
             if let Some(token) = github_token() {
                 request = request.bearer_auth(token);
             }
         }
-        let response =
-            self.send_request(request).await.wrap_err_with(|| format!("failed to GET {url}"))?;
-        Ok(response)
-    }
-
-    /// Sends a request and errors on any non-success HTTP status.
-    async fn send_ok(&self, url: &str) -> Result<reqwest::Response> {
-        let response = self.send(url).await?;
-        if !response.status().is_success() {
-            bail!("failed to download {url}: HTTP {}", response.status());
-        }
-        Ok(response)
+        let request = request.build()?;
+        let retryable_host = request.url().host_str().is_some_and(|host| GitHubHosts == host);
+        retry(
+            self.max_retries,
+            || async {
+                let response =
+                    self.client.execute(request.try_clone().expect("bodyless request")).await?;
+                if is_retryable_status(response.status()) {
+                    // Drop error bodies before retrying. Consumers handle permanent statuses,
+                    // including optional 404s, themselves.
+                    response.error_for_status_ref()?;
+                }
+                consume(response).await
+            },
+            |error: &eyre::Report| {
+                retryable_host
+                    && error
+                        .downcast_ref::<reqwest::Error>()
+                        .is_some_and(|error| error.status().is_none_or(is_retryable_status))
+            },
+        )
+        .await
+        .wrap_err_with(|| format!("failed to download {url}"))
     }
 
     pub(crate) async fn download_to_file(&self, url: &str, path: &Path) -> Result<()> {
-        let response = self.send_ok(url).await?;
+        self.request(reqwest::Method::GET, url, |response| async move {
+            let response = successful_response(response)?;
+            let total_size = response.content_length();
 
-        let total_size = response.content_length();
+            let pb = match total_size {
+                Some(size) => {
+                    let pb = ProgressBar::new(size);
+                    let template =
+                        "{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})";
+                    pb.set_style(
+                        ProgressStyle::default_bar()
+                            .template(template)
+                            .unwrap()
+                            .progress_chars("#>-"),
+                    );
+                    pb
+                }
+                None => {
+                    let pb = ProgressBar::new_spinner();
+                    pb.set_style(
+                        ProgressStyle::default_spinner()
+                            .template("{spinner:.green} {bytes}")
+                            .unwrap(),
+                    );
+                    pb
+                }
+            };
 
-        let pb = match total_size {
-            Some(size) => {
-                let pb = ProgressBar::new(size);
-                pb.set_style(
-                    ProgressStyle::default_bar()
-                        .template(
-                            "{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
-                        )
-                        .unwrap()
-                        .progress_chars("#>-"),
-                );
-                pb
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
             }
-            None => {
-                let pb = ProgressBar::new_spinner();
-                pb.set_style(
-                    ProgressStyle::default_spinner().template("{spinner:.green} {bytes}").unwrap(),
-                );
-                pb
+            // Truncate on every attempt so an interrupted download cannot leave stale bytes.
+            let mut file = fs::File::create(path)?;
+            let mut stream = response.bytes_stream();
+
+            while let Some(chunk) = stream.next().await {
+                let chunk = match chunk {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        pb.finish_and_clear();
+                        return Err(error).wrap_err("failed to read response chunk");
+                    }
+                };
+                file.write_all(&chunk)?;
+                pb.inc(chunk.len() as u64);
             }
-        };
 
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut file = fs::File::create(path)?;
-        let mut stream = response.bytes_stream();
-
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.wrap_err("failed to read response chunk")?;
-            file.write_all(&chunk)?;
-            pb.inc(chunk.len() as u64);
-        }
-
-        pb.finish_and_clear();
-        Ok(())
+            pb.finish_and_clear();
+            Ok(())
+        })
+        .await
     }
 
     pub(crate) async fn download_to_string(&self, url: &str) -> Result<String> {
-        let response = self.send_ok(url).await?;
-        response.text().await.wrap_err("failed to read response body")
+        self.request(reqwest::Method::GET, url, |response| async {
+            successful_response(response)?.text().await.wrap_err("failed to read response body")
+        })
+        .await
     }
 
     /// Follows redirects for `url` (via a `HEAD` request, without downloading a
@@ -200,15 +175,10 @@ impl Downloader {
     /// No token is attached, since `github.com` (unlike `api.github.com`) is not
     /// subject to the unauthenticated API rate limit.
     pub(crate) async fn resolve_redirect_url(&self, url: &str) -> Result<String> {
-        let parsed = reqwest::Url::parse(url).wrap_err_with(|| format!("invalid URL {url}"))?;
-        let response = self
-            .send_request(self.client.head(parsed))
-            .await
-            .wrap_err_with(|| format!("failed to HEAD {url}"))?;
-        if !response.status().is_success() {
-            bail!("failed to resolve {url}: HTTP {}", response.status());
-        }
-        Ok(response.url().to_string())
+        self.request(reqwest::Method::HEAD, url, |response| async {
+            Ok(successful_response(response)?.url().to_string())
+        })
+        .await
     }
 
     /// Returns whether `url` is publicly available without downloading its body.
@@ -217,18 +187,14 @@ impl Downloader {
     /// non-success status remain errors so callers do not mistake an outage for
     /// a missing resource.
     pub(crate) async fn is_url_available(&self, url: &str) -> Result<bool> {
-        let parsed = reqwest::Url::parse(url).wrap_err_with(|| format!("invalid URL {url}"))?;
-        let response = self
-            .send_request(self.client.head(parsed))
-            .await
-            .wrap_err_with(|| format!("failed to HEAD {url}"))?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(false);
-        }
-        if !response.status().is_success() {
-            bail!("failed to probe {url}: HTTP {}", response.status());
-        }
-        Ok(true)
+        self.request(reqwest::Method::HEAD, url, |response| async {
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return Ok(false);
+            }
+            successful_response(response)?;
+            Ok(true)
+        })
+        .await
     }
 
     /// Like [`download_to_string`](Self::download_to_string), but returns
@@ -239,16 +205,25 @@ impl Downloader {
     /// while a transport failure aborts the install rather than silently downgrading to
     /// an unverified binary.
     pub(crate) async fn download_to_string_optional(&self, url: &str) -> Result<Option<String>> {
-        let response = self.send(url).await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        if !response.status().is_success() {
-            bail!("failed to download {url}: HTTP {}", response.status());
-        }
-        let body = response.text().await.wrap_err("failed to read response body")?;
-        Ok(Some(body))
+        self.request(reqwest::Method::GET, url, |response| async {
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            let body = successful_response(response)?
+                .text()
+                .await
+                .wrap_err("failed to read response body")?;
+            Ok(Some(body))
+        })
+        .await
     }
+}
+
+fn successful_response(response: reqwest::Response) -> Result<reqwest::Response> {
+    if !response.status().is_success() {
+        bail!("HTTP {}", response.status());
+    }
+    Ok(response)
 }
 
 pub(crate) fn compute_sha256(path: &Path) -> Result<String> {
@@ -304,6 +279,146 @@ pub(crate) fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const UNAVAILABLE: &str =
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    const PARTIAL: &str =
+        "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nstale partial contents";
+    const OK: &str = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+    const MISSING: &str =
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+    // Route a GitHub hostname to a loopback server without TLS or ambient proxies/tokens.
+    fn fixture(
+        responses: Vec<&'static str>,
+        max_retries: u32,
+    ) -> (Downloader, String, std::thread::JoinHandle<()>) {
+        use std::{
+            io::Read,
+            net::TcpListener,
+            time::{Duration, Instant},
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            for response in responses {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "expected another download attempt");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                };
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                assert!(
+                    !String::from_utf8_lossy(&request)
+                        .to_ascii_lowercase()
+                        .contains("authorization:")
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .resolve("github.com", address)
+            .retry(reqwest::retry::never())
+            .build()
+            .unwrap();
+        (
+            Downloader { client, max_retries },
+            format!("http://github.com:{}/file", address.port()),
+            server,
+        )
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+    }
+
+    #[test]
+    fn file_retries_status_and_partial_body_and_truncates_destination() {
+        let (downloader, url, server) = fixture(vec![UNAVAILABLE, PARTIAL, OK], 2);
+        let file = tempfile::NamedTempFile::new().unwrap();
+        runtime().block_on(downloader.download_to_file(&url, file.path())).unwrap();
+        assert_eq!(fs::read(file.path()).unwrap(), b"ok");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn text_and_optional_text_retry_partial_bodies() {
+        for optional in [false, true] {
+            let (downloader, url, server) = fixture(vec![PARTIAL, OK], 1);
+            let text = runtime().block_on(async {
+                if optional {
+                    downloader.download_to_string_optional(&url).await.unwrap().unwrap()
+                } else {
+                    downloader.download_to_string(&url).await.unwrap()
+                }
+            });
+            assert_eq!(text, "ok");
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn head_requests_retry_transient_statuses() {
+        for probe in [false, true] {
+            let (downloader, url, server) = fixture(vec![UNAVAILABLE, OK], 1);
+            runtime().block_on(async {
+                if probe {
+                    assert!(downloader.is_url_available(&url).await.unwrap());
+                } else {
+                    assert_eq!(downloader.resolve_redirect_url(&url).await.unwrap(), url);
+                }
+            });
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn request_and_body_failures_share_one_budget() {
+        let (downloader, url, server) = fixture(vec![UNAVAILABLE, PARTIAL], 1);
+        let error = runtime().block_on(downloader.download_to_string(&url)).unwrap_err();
+        assert!(error.downcast_ref::<reqwest::Error>().unwrap().status().is_none());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn missing_files_remain_optional_and_local_io_errors_are_permanent() {
+        for probe in [false, true] {
+            let (downloader, url, server) = fixture(vec![MISSING], 5);
+            runtime().block_on(async {
+                if probe {
+                    assert!(!downloader.is_url_available(&url).await.unwrap());
+                } else {
+                    assert_eq!(downloader.download_to_string_optional(&url).await.unwrap(), None);
+                }
+            });
+            server.join().unwrap();
+        }
+        let (downloader, url, server) = fixture(vec![MISSING], 5);
+        let error = runtime().block_on(downloader.download_to_string(&url)).unwrap_err();
+        assert!(format!("{error:#}").contains("404"));
+        server.join().unwrap();
+
+        let (downloader, url, server) = fixture(vec![OK], 5);
+        let directory = tempfile::tempdir().unwrap();
+        let error =
+            runtime().block_on(downloader.download_to_file(&url, directory.path())).unwrap_err();
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
+        server.join().unwrap();
+    }
 
     #[test]
     fn retryable_status_classification() {

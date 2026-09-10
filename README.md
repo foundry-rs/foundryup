@@ -22,11 +22,14 @@ from source instead. Passing `--force` explicitly disables release verification.
 
 ## Download retries
 
-GitHub requests retry transient HTTP and connection failures up to five times, waiting
+GitHub downloads, including the bootstrap installer, retry transient HTTP, connection,
+and response-body failures up to five times, waiting
 1, 2, 4, 8, and 16 seconds between attempts. Set `FOUNDRYUP_MAX_RETRIES` to change the
 retry count, or `0` to disable retries; delays remain capped at 16 seconds. A failed
-attestation download still aborts installation. Retries apply when sending requests,
-not to failures while reading a successful response body.
+attestation download still aborts installation. Each retry restarts the entire download;
+partial files are overwritten. Permanent HTTP failures such as 404 and local file I/O
+errors are not retried. Incomplete attestations use the same backoff policy. Git and
+Cargo manage their own network operations during source builds.
 
 ## Getting help
 
