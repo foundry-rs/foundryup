@@ -21,6 +21,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     permissions:
+      id-token: write
       contents: read
     strategy:
       fail-fast: false
@@ -55,6 +56,8 @@ jobs:
             platform: win32
             arch: amd64
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@ce5deead22108ccc6aafba0ca47d2a9e6d1a40e8
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -74,11 +77,15 @@ jobs:
           cache-on-failure: true
           cache-targets: false
           prefix-key: v1-rust
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@c3ec0de9ae7f1019cea21aa96aa0a895b9552063 # v2.87.9
+        with:
+          tool: nextest@0.9.140
+          checksum: true
+          fallback: none
       - name: Build
-        run: cargo build --target ${{ matrix.target }}
+        run: cargo build --locked --target ${{ matrix.target }}
       - name: Test
-        run: cargo nextest run --no-fail-fast --target ${{ matrix.target }}
+        run: cargo nextest run --locked --no-fail-fast --target ${{ matrix.target }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -86,8 +93,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
+      id-token: write
       contents: read
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@ce5deead22108ccc6aafba0ca47d2a9e6d1a40e8
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -97,8 +107,11 @@ jobs:
     runs-on: depot-ubuntu-latest
     timeout-minutes: 5
     permissions:
+      id-token: write
       contents: read
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@ce5deead22108ccc6aafba0ca47d2a9e6d1a40e8
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -110,8 +123,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
+      id-token: write
       contents: read
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@ce5deead22108ccc6aafba0ca47d2a9e6d1a40e8
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -123,7 +139,7 @@ jobs:
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
           cache-on-failure: true
-      - run: cargo clippy --workspace --all-targets --all-features
+      - run: cargo +nightly clippy --locked --workspace --all-targets --all-features
         env:
           RUSTFLAGS: -Dwarnings
 
@@ -131,8 +147,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
+      id-token: write
       contents: read
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@ce5deead22108ccc6aafba0ca47d2a9e6d1a40e8
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -140,7 +159,7 @@ jobs:
         with:
           toolchain: nightly
           components: rustfmt
-      - run: cargo fmt --all --check
+      - run: cargo +nightly fmt --all --check
 
   ci-success:
     runs-on: ubuntu-latest
