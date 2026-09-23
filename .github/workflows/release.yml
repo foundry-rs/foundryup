@@ -132,13 +132,8 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Create release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" artifacts/* --clobber
-          else
-            gh release create "$RELEASE_TAG" artifacts/* --verify-tag --generate-notes
-          fi
+      - name: Create release # zizmor: ignore[superfluous-actions] Preserve the existing pinned release action and its behavior.
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          files: artifacts/*
+          generate_release_notes: true
