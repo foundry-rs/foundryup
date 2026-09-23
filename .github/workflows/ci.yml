@@ -57,12 +57,13 @@ jobs:
             arch: amd64
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@ce5deead22108ccc6aafba0ca47d2a9e6d1a40e8
-      - uses: actions/checkout@v7
+        uses: tempoxyz/gh-actions/actions/secure-runner@117919c943b804057be733b0c4034c5542e58959
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
       - name: Install musl-tools
         if: contains(matrix.target, 'musl')
@@ -72,7 +73,7 @@ jobs:
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
             sudo apt-get install -y gcc-aarch64-linux-gnu
           fi
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cache-on-failure: true
           cache-targets: false
@@ -97,8 +98,8 @@ jobs:
       contents: read
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@ce5deead22108ccc6aafba0ca47d2a9e6d1a40e8
-      - uses: actions/checkout@v7
+        uses: tempoxyz/gh-actions/actions/secure-runner@117919c943b804057be733b0c4034c5542e58959
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: crate-ci/typos@cf5f1c29a8ac336af8568821ec41919923b05a83 # v1
@@ -111,8 +112,8 @@ jobs:
       contents: read
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@ce5deead22108ccc6aafba0ca47d2a9e6d1a40e8
-      - uses: actions/checkout@v7
+        uses: tempoxyz/gh-actions/actions/secure-runner@117919c943b804057be733b0c4034c5542e58959
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Shellcheck
@@ -127,8 +128,8 @@ jobs:
       contents: read
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@ce5deead22108ccc6aafba0ca47d2a9e6d1a40e8
-      - uses: actions/checkout@v7
+        uses: tempoxyz/gh-actions/actions/secure-runner@117919c943b804057be733b0c4034c5542e58959
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
@@ -151,8 +152,8 @@ jobs:
       contents: read
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@ce5deead22108ccc6aafba0ca47d2a9e6d1a40e8
-      - uses: actions/checkout@v7
+        uses: tempoxyz/gh-actions/actions/secure-runner@117919c943b804057be733b0c4034c5542e58959
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
@@ -173,6 +174,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Decide whether the needed jobs succeeded or failed
-        uses: re-actors/alls-green@release/v1
+        uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # release/v1
         with:
           jobs: ${{ toJSON(needs) }}
