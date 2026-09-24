@@ -43,7 +43,7 @@ jobs:
             target: aarch64-unknown-linux-musl
             platform: alpine
             arch: arm64
-          - os: macos-14
+          - os: macos-15-large
             target: x86_64-apple-darwin
             platform: darwin
             arch: amd64
