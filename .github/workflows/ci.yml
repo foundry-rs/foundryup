@@ -78,7 +78,7 @@ jobs:
           cache-on-failure: true
           cache-targets: false
           prefix-key: v1-rust
-      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
+      - uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2.87.17
         with:
           tool: nextest@0.9.140
           checksum: true
@@ -137,7 +137,7 @@ jobs:
           toolchain: nightly
           components: clippy
       - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
       - run: cargo +nightly clippy --locked --workspace --all-targets --all-features
