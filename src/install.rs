@@ -155,12 +155,6 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
     need_cmd("git")?;
     need_cmd("cargo")?;
 
-    let branch = if let Some(pr) = args.pr {
-        format!("refs/pull/{pr}/head")
-    } else {
-        args.branch.clone().unwrap_or_else(|| "master".to_string())
-    };
-
     let repo_path = config.repo_dir(repo);
     let author = repo.split('/').next().unwrap_or(repo);
 
@@ -178,6 +172,23 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
             bail!("git clone failed");
         }
     }
+
+    let branch = if let Some(pr) = args.pr {
+        format!("refs/pull/{pr}/head")
+    } else if let Some(branch) = &args.branch {
+        branch.clone()
+    } else {
+        // `git clone` records the remote's default branch as `origin/HEAD`.
+        let output = tokio::process::Command::new("git")
+            .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+            .current_dir(&repo_path)
+            .output()
+            .await?;
+        if !output.status.success() {
+            bail!("could not resolve the default branch of origin");
+        }
+        String::from_utf8_lossy(&output.stdout).trim().trim_start_matches("origin/").to_string()
+    };
 
     say!("fetching {branch}...");
     let status = tokio::process::Command::new("git")
