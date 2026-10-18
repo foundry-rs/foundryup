@@ -173,49 +173,40 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
         }
     }
 
-    // A commit alone does not need a branch, so only resolve the default branch
-    // when nothing else selects what to build.
     let branch = if let Some(pr) = args.pr {
-        Some(format!("refs/pull/{pr}/head"))
-    } else if let Some(ref branch) = args.branch {
-        Some(branch.clone())
-    } else if args.commit.is_none() {
-        Some(fetch_default_branch(&repo_path).await?)
+        format!("refs/pull/{pr}/head")
+    } else if let Some(branch) = &args.branch {
+        branch.clone()
     } else {
-        None
+        // `git clone` records the remote's default branch as `origin/HEAD`.
+        let output = tokio::process::Command::new("git")
+            .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+            .current_dir(&repo_path)
+            .output()
+            .await?;
+        if !output.status.success() {
+            bail!("could not resolve the default branch of origin");
+        }
+        String::from_utf8_lossy(&output.stdout).trim().trim_start_matches("origin/").to_string()
     };
 
-    if let Some(ref branch) = branch {
-        say!("fetching {branch}...");
-        let status = tokio::process::Command::new("git")
-            .args(["fetch", "origin", &format!("{branch}:remotes/origin/{branch}")])
-            .current_dir(&repo_path)
-            .status()
-            .await?;
-        if !status.success() {
-            bail!("git fetch failed");
-        }
+    say!("fetching {branch}...");
+    let status = tokio::process::Command::new("git")
+        .args(["fetch", "origin", &format!("{branch}:remotes/origin/{branch}")])
+        .current_dir(&repo_path)
+        .status()
+        .await?;
+    if !status.success() {
+        bail!("git fetch failed");
+    }
 
-        let status = tokio::process::Command::new("git")
-            .args(["checkout", &format!("origin/{branch}")])
-            .current_dir(&repo_path)
-            .status()
-            .await?;
-        if !status.success() {
-            bail!("git checkout failed");
-        }
-    } else if let Some(ref commit) = args.commit {
-        // The remote can serve a full commit hash directly. An abbreviated hash
-        // must be resolved locally, so fetch all branches for it instead.
-        say!("fetching {commit}...");
-        let mut cmd = tokio::process::Command::new("git");
-        cmd.args(["fetch", "origin"]).current_dir(&repo_path);
-        if is_full_commit_hash(commit) {
-            cmd.arg(commit);
-        }
-        if !cmd.status().await?.success() {
-            bail!("git fetch failed");
-        }
+    let status = tokio::process::Command::new("git")
+        .args(["checkout", &format!("origin/{branch}")])
+        .current_dir(&repo_path)
+        .status()
+        .await?;
+    if !status.success() {
+        bail!("git checkout failed");
     }
 
     if let Some(ref commit) = args.commit {
@@ -234,7 +225,7 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
     } else if let Some(pr) = args.pr {
         format!("{author}-pr-{pr}")
     } else {
-        let normalized_branch = branch.unwrap_or_default().replace('/', "-");
+        let normalized_branch = branch.replace('/', "-");
         format!("{author}-branch-{normalized_branch}")
     };
 
@@ -1467,37 +1458,6 @@ fn need_cmd(cmd: &str) -> Result<()> {
     which::which(cmd).map(|_| ()).map_err(|_| eyre::eyre!("need '{cmd}' (command not found)"))
 }
 
-/// Asks the `origin` remote of the repo at `repo_path` for its default branch.
-async fn fetch_default_branch(repo_path: &Path) -> Result<String> {
-    let output = tokio::process::Command::new("git")
-        .args(["ls-remote", "--symref", "origin", "HEAD"])
-        .current_dir(repo_path)
-        .output()
-        .await?;
-    if !output.status.success() {
-        bail!("git ls-remote failed:\n{}", String::from_utf8_lossy(&output.stderr).trim());
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    default_branch_from_ls_remote(&stdout)
-        .map(str::to_string)
-        .ok_or_else(|| eyre::eyre!("could not resolve the default branch of origin"))
-}
-
-/// Parses the branch name from the `ref: refs/heads/<branch>\tHEAD` line that
-/// `git ls-remote --symref <remote> HEAD` prints.
-fn default_branch_from_ls_remote(output: &str) -> Option<&str> {
-    output.lines().find_map(|line| {
-        let (target, name) = line.strip_prefix("ref: ")?.split_once('\t')?;
-        (name == "HEAD").then_some(target)?.strip_prefix("refs/heads/")
-    })
-}
-
-/// Returns whether `commit` is a full SHA-1 or SHA-256 commit hash, which a
-/// remote can serve directly by `git fetch`.
-fn is_full_commit_hash(commit: &str) -> bool {
-    matches!(commit.len(), 40 | 64) && commit.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
 /// Removes any previously activated `bin` from the bin dir, clearing both the
 /// bare and `.exe` names. On Windows the active name is `<bin>.exe`, so clearing
 /// only that leaves a stale bare `<bin>` (e.g. from the legacy bash foundryup)
@@ -1818,34 +1778,6 @@ mod tests {
             tag_from_release_url("https://github.com/foundry-rs/foundry/releases/tag/"),
             None
         );
-    }
-
-    #[test]
-    fn default_branch_from_ls_remote_reads_head_symref() {
-        let output = "ref: refs/heads/main\tHEAD\nd497beea7096ff2a8e583c8b307941f24a61b06b\tHEAD\n";
-        assert_eq!(default_branch_from_ls_remote(output), Some("main"));
-        let output = "ref: refs/heads/release/v1\tHEAD\n";
-        assert_eq!(default_branch_from_ls_remote(output), Some("release/v1"));
-    }
-
-    #[test]
-    fn default_branch_from_ls_remote_rejects_missing_symref() {
-        // A remote without a symbolic HEAD prints only the hash line.
-        assert_eq!(
-            default_branch_from_ls_remote("d497beea7096ff2a8e583c8b307941f24a61b06b\tHEAD\n"),
-            None
-        );
-        assert_eq!(default_branch_from_ls_remote("ref: refs/tags/v1\tHEAD\n"), None);
-        assert_eq!(default_branch_from_ls_remote(""), None);
-    }
-
-    #[test]
-    fn is_full_commit_hash_cases() {
-        assert!(is_full_commit_hash("d497beea7096ff2a8e583c8b307941f24a61b06b"));
-        assert!(is_full_commit_hash(&"a".repeat(64)));
-        assert!(!is_full_commit_hash("d497bee"));
-        assert!(!is_full_commit_hash("main"));
-        assert!(!is_full_commit_hash("g497beea7096ff2a8e583c8b307941f24a61b06b"));
     }
 
     #[test]
