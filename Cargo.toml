@@ -2,7 +2,7 @@
 name = "foundryup"
 version = "0.0.9"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/foundry-rs/foundryup"
@@ -78,7 +78,7 @@ tempfile = "3"
 self-replace = "1"
 time = { version = "0.3", features = ["parsing"] }
 which = "8"
-zip = { version = "7", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 # tracing
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
