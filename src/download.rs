@@ -89,10 +89,8 @@ impl Downloader {
         let is_github_api = is_github_api_url(&parsed);
         let mut request = self.client.request(method, parsed);
         // Never attach the token to release downloads or cross-host redirects.
-        if is_github_api {
-            if let Some(token) = github_token() {
-                request = request.bearer_auth(token);
-            }
+        if is_github_api && let Some(token) = github_token() {
+            request = request.bearer_auth(token);
         }
         let request = request.build()?;
         let retryable_host = request.url().host_str().is_some_and(|host| GitHubHosts == host);

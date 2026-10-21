@@ -1010,10 +1010,8 @@ pub(crate) async fn use_version_resolved(
         return use_version(config, repo, &tag);
     }
 
-    if !repo_explicit {
-        if let Some(found_repo) = find_unique_repo_for_version(config, &tag)? {
-            return use_version(config, &found_repo, &tag);
-        }
+    if !repo_explicit && let Some(found_repo) = find_unique_repo_for_version(config, &tag)? {
+        return use_version(config, &found_repo, &tag);
     }
 
     use_version(config, repo, &tag)
@@ -1141,20 +1139,20 @@ fn activate_bin(config: &Config, version: &str, bin: &str, src: &Path) -> Result
 }
 
 fn warn_if_shadowed(config: &Config, bin: &str, dest: &Path) {
-    if let Ok(which_path) = which::which(bin) {
-        if which_path != dest {
-            warn!("");
-            eprintln!(
-                r#"There are multiple binaries with the name '{bin}' present in your 'PATH'.
+    if let Ok(which_path) = which::which(bin)
+        && which_path != dest
+    {
+        warn!("");
+        eprintln!(
+            r#"There are multiple binaries with the name '{bin}' present in your 'PATH'.
 This may be the result of installing '{bin}' using another method,
 like Cargo or other package managers.
 You may need to run 'rm {which_path}' or move '{bin_dir}'
 in your 'PATH' to allow the newly installed version to take precedence!
 "#,
-                which_path = which_path.display(),
-                bin_dir = config.bin_dir.display()
-            );
-        }
+            which_path = which_path.display(),
+            bin_dir = config.bin_dir.display()
+        );
     }
 }
 
@@ -1348,12 +1346,11 @@ fn nightly_release_tags_from_feed(feed: &str, repo: &str) -> Option<Vec<String>>
                             .map(|value| value.into_owned());
                     }
                 }
-                if is_alternate {
-                    if let Some(candidate) =
+                if is_alternate
+                    && let Some(candidate) =
                         href.and_then(|href| nightly_tag_from_release_url(&href, repo))
-                    {
-                        tag = Some(candidate);
-                    }
+                {
+                    tag = Some(candidate);
                 }
             }
             Ok(Event::End(event)) if event.name() == QName(b"entry") => {
