@@ -128,8 +128,8 @@ forge v2.0.0
 "#]]);
 }
 
-// Activating again from the foundryup that the proxies link to keeps them, since Windows cannot
-// remove hard links to the running executable.
+// Activation links the proxies to the running foundryup. Activating again from the foundryup that
+// they link to keeps them, since Windows cannot remove hard links to the running executable.
 #[test]
 fn reactivation_from_linked_foundryup() {
     let (_temp_dir, foundry_dir) =
@@ -152,6 +152,19 @@ forge v1.0.0
     #[cfg(unix)]
     for bin in BINS {
         assert_eq!(std::fs::read_link(foundry_dir.join("bin").join(bin)).unwrap(), installed);
+    }
+
+    foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["--use", "v2.0.0"]).assert().success();
+    proxy(&foundry_dir, "forge").arg("-V").assert().success().stdout_eq(str![[r#"
+forge v2.0.0
+
+"#]]);
+    #[cfg(unix)]
+    for bin in BINS {
+        assert_eq!(
+            std::fs::read_link(foundry_dir.join("bin").join(bin)).unwrap(),
+            snapbox::cmd::cargo_bin!("foundryup")
+        );
     }
 }
 

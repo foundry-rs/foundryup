@@ -156,11 +156,12 @@ impl Config {
             .ok_or_else(|| eyre::eyre!("toolchain path is not valid UTF-8: {}", dir.display()))?;
         // Replace the file atomically so that a proxy starting meanwhile never reads it
         // half-written.
-        let mut file = tempfile::NamedTempFile::new_in(&self.foundry_dir)?;
-        file.write_all(dir.as_bytes())?;
-        // Temporary files are private, but the proxies may run as other users.
+        let mut builder = tempfile::Builder::new();
+        // Temporary files are private by default, but the proxies may run as other users.
         #[cfg(unix)]
-        file.as_file().set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o644))?;
+        builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o644));
+        let mut file = builder.tempfile_in(&self.foundry_dir)?;
+        file.write_all(dir.as_bytes())?;
         file.persist(self.default_toolchain_file())?;
         Ok(())
     }
