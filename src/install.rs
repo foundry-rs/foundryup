@@ -120,7 +120,7 @@ async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> R
         warn!("--branch, --install, --use, and --repo arguments are ignored during local install");
     }
 
-    // Resolve to an absolute path so the symlinks below point at the build
+    // Resolve to an absolute path so the default toolchain points at the build
     // artifacts regardless of the current working directory.
     let local_path = fs::canonicalize(local_path)
         .wrap_err_with(|| format!("local repository not found: {}", local_path.display()))?;
@@ -130,22 +130,7 @@ async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> R
 
     let built = build_bins(config, local_path, args).await?;
 
-    for &Bin { optional, name: bin } in config.network.bins {
-        let src = built_bin_path(&built, bin);
-        if src.is_file() {
-            let dest = config.bin_path(bin);
-            clear_active_bin(config, bin)?;
-
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(src, &dest)?;
-            #[cfg(windows)]
-            fs::copy(src, &dest)?;
-        } else if optional {
-            clear_active_bin(config, bin)?;
-        } else {
-            bail!("binary {bin} not found at {}", src.display());
-        }
-    }
+    activate(config, &built.build_dir, "the local build")?;
 
     say!("done");
     Ok(())
@@ -1019,7 +1004,10 @@ pub(crate) async fn use_version_resolved(
 
 /// Finds the version directory named `version` across all installed repos,
 /// erroring if more than one repo matches.
-fn find_unique_repo_for_version(config: &Config, version: &str) -> Result<Option<String>> {
+pub(crate) fn find_unique_repo_for_version(
+    config: &Config,
+    version: &str,
+) -> Result<Option<String>> {
     if !config.versions_dir.exists() {
         return Ok(None);
     }
@@ -1086,55 +1074,63 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
 
     crate::process::check_bins_in_use(config)?;
 
+    activate(config, &version_dir, &format!("version {version}"))
+}
+
+/// Makes the toolchain in `dir` the default and links a proxy into the bin dir for each of its
+/// binaries.
+fn activate(config: &Config, dir: &Path, label: &str) -> Result<()> {
     // Preflight all bins before mutating: prove each one exists and runs the same
     // semantic check activation relies on, so neither a missing nor a broken
     // binary can leave a mix of old and new binaries active.
     for &Bin { optional, name: bin } in config.network.bins {
-        let src = version_dir.join(bin_name(bin));
+        let src = dir.join(bin_name(bin));
         if src.is_file() {
-            get_bin_version(&src)
-                .wrap_err_with(|| format!("failed to run {bin} in version {version}"))?;
+            get_bin_version(&src).wrap_err_with(|| format!("failed to run {bin} in {label}"))?;
         } else if !optional {
-            bail!("binary {bin} not found in version {version} at {}", src.display());
+            bail!("binary {bin} not found in {label} at {}", src.display());
         }
     }
 
     fs::create_dir_all(&config.bin_dir)?;
 
-    for &Bin { optional, name: bin } in config.network.bins {
-        let bin_name = bin_name(bin);
-        let src = version_dir.join(&bin_name);
-        if src.is_file() {
-            activate_bin(config, version, bin, &src)?;
-        } else if optional {
+    // Read before switching, while the proxies still run the previous default.
+    let old_versions = config
+        .network
+        .bins
+        .iter()
+        .map(|bin| get_bin_version(&config.bin_path(bin.name)).ok())
+        .collect::<Vec<_>>();
+
+    config.set_default_toolchain(dir)?;
+
+    let proxy = std::env::current_exe()?;
+    for (&Bin { name: bin, .. }, old_version) in config.network.bins.iter().zip(old_versions) {
+        if !dir.join(bin_name(bin)).is_file() {
             clear_active_bin(config, bin)?;
-        } else {
-            bail!("binary {bin} not found in version {version} at {}", src.display());
+            continue;
         }
+
+        let dest = config.bin_path(bin);
+        clear_active_bin(config, bin)?;
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&proxy, &dest)?;
+        #[cfg(not(unix))]
+        if fs::hard_link(&proxy, &dest).is_err() {
+            fs::copy(&proxy, &dest)?;
+        }
+
+        let v = get_bin_version(&dest)
+            .wrap_err_with(|| format!("failed to run {bin} after activating {label}"))?;
+        match old_version {
+            Some(old) if old != v => say!("use - {v} (from {old})"),
+            _ => say!("use - {v}"),
+        }
+
+        warn_if_shadowed(config, bin, &dest);
     }
 
-    Ok(())
-}
-
-fn activate_bin(config: &Config, version: &str, bin: &str, src: &Path) -> Result<()> {
-    let dest = config.bin_path(bin);
-    let old_version = if dest.exists() { get_bin_version(&dest).ok() } else { None };
-
-    clear_active_bin(config, bin)?;
-
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(src, &dest)?;
-    #[cfg(not(unix))]
-    fs::copy(src, &dest)?;
-
-    let v = get_bin_version(&dest)
-        .wrap_err_with(|| format!("failed to run {bin} after activating version {version}"))?;
-    match old_version {
-        Some(old) if old != v => say!("use - {v} (from {old})"),
-        _ => say!("use - {v}"),
-    }
-
-    warn_if_shadowed(config, bin, &dest);
     Ok(())
 }
 
@@ -1433,7 +1429,7 @@ fn latest_nightly_release_tag(json: &str, repo: &str) -> Result<String> {
         .ok_or_else(|| eyre::eyre!("could not find a nightly release tag for {repo}"))
 }
 
-fn normalize_version(version: &str) -> (String, String) {
+pub(crate) fn normalize_version(version: &str) -> (String, String) {
     // Only concrete `nightly-<sha>` tags map to the nightly channel here; the
     // bare `nightly` channel is resolved earlier.
     if version.starts_with("nightly-") {
@@ -1446,7 +1442,7 @@ fn normalize_version(version: &str) -> (String, String) {
     }
 }
 
-fn bin_name(name: &str) -> String {
+pub(crate) fn bin_name(name: &str) -> String {
     if cfg!(windows) { format!("{name}.exe") } else { name.to_string() }
 }
 

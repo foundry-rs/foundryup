@@ -714,6 +714,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "which",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

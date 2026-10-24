@@ -1,31 +1,39 @@
 use snapbox::{assert_data_eq, cmd::Command, str};
-use std::env::consts::EXE_SUFFIX;
+use std::{env::consts::EXE_SUFFIX, path::Path, sync::LazyLock};
 
 const BINS: &[&str] = &["forge", "cast", "anvil", "chisel"];
 const OPTIONAL_BINS: &[&str] = &["solar"];
 
 mod foundry_bins;
 mod installer_script;
+mod proxy;
 mod self_update;
 
 fn foundryup() -> Command {
     Command::new(snapbox::cmd::cargo_bin!("foundryup")).env("NO_COLOR", "1")
 }
 
-/// Writes an executable stub binary at `path`.
+/// Writes a stand-in for a Foundry binary at `path`, built from `tests/fixtures/fake_bin.rs`.
 ///
-/// Activation now runs `<bin> -V` and fails if it cannot execute, so test
-/// fixtures need real executables rather than placeholder text. We reuse the
-/// `foundryup` test binary, which exits 0 and prints a version for `-V` on every
-/// platform. Linking avoids copying the debug test binary for every fake bin.
-fn write_fake_bin(path: &std::path::Path) {
-    let source = snapbox::cmd::cargo_bin!("foundryup");
+/// A link to the `foundryup` test binary would run as a toolchain proxy because of its name, so,
+/// like rustup's tests, compile a separate binary once per test process.
+fn write_fake_bin(path: &Path) {
+    static FAKE_BIN: LazyLock<Vec<u8>> = LazyLock::new(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join(format!("fake_bin{EXE_SUFFIX}"));
+        let status = std::process::Command::new("rustc")
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/fake_bin.rs"))
+            .args(["-C", "strip=symbols", "-o"])
+            .arg(&out)
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to compile the fake binary");
+        std::fs::read(out).unwrap()
+    });
+
+    std::fs::write(path, &*FAKE_BIN).unwrap();
     #[cfg(unix)]
-    std::os::unix::fs::symlink(source, path).unwrap();
-    #[cfg(windows)]
-    std::fs::hard_link(source, path).unwrap();
-    #[cfg(not(any(unix, windows)))]
-    std::fs::copy(source, path).unwrap();
+    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
 }
 
 #[test]
@@ -390,7 +398,6 @@ fn use_version_ambiguous_across_repos_errors() {
 
 // A `--use` that fails on a missing binary must not leave a partially-switched
 // toolchain: the previously active version stays fully active.
-#[cfg(unix)]
 #[test]
 fn use_version_missing_bin_leaves_previous_active() {
     let temp_dir = tempfile::Builder::new().tempdir().unwrap();
@@ -423,19 +430,19 @@ fn use_version_missing_bin_leaves_previous_active() {
 ...
 "#]]);
 
-    // ...and every active binary must still point at v1.0.0, not a mix.
-    let bin_dir = foundry_dir.join("bin");
+    // ...and every active binary must still run v1.0.0, not a mix.
     for &bin in BINS {
-        let active = bin_dir.join(format!("{bin}{EXE_SUFFIX}"));
-        let target = std::fs::read_link(&active)
-            .unwrap_or_else(|e| panic!("{bin} is not an active symlink: {e}"));
-        assert_eq!(target, good_dir.join(format!("{bin}{EXE_SUFFIX}")), "{bin} was switched");
+        Command::new(foundry_dir.join(format!("bin/{bin}{EXE_SUFFIX}")))
+            .env("FOUNDRY_DIR", &foundry_dir)
+            .arg("-V")
+            .assert()
+            .success()
+            .stdout_eq(format!("{bin} v1.0.0\n"));
     }
 }
 
 // A `--use` that fails on a broken (present but non-runnable) binary must also
 // leave the previously active version fully active, not a partial switch.
-#[cfg(unix)]
 #[test]
 fn use_version_broken_bin_leaves_previous_active() {
     let temp_dir = tempfile::Builder::new().tempdir().unwrap();
@@ -470,17 +477,18 @@ fn use_version_broken_bin_leaves_previous_active() {
 ...
 "#]]);
 
-    // ...and every active binary must still point at v1.0.0, not a mix.
-    let bin_dir = foundry_dir.join("bin");
+    // ...and every active binary must still run v1.0.0, not a mix.
     for &bin in BINS {
-        let active = bin_dir.join(format!("{bin}{EXE_SUFFIX}"));
-        let target = std::fs::read_link(&active)
-            .unwrap_or_else(|e| panic!("{bin} is not an active symlink: {e}"));
-        assert_eq!(target, good_dir.join(format!("{bin}{EXE_SUFFIX}")), "{bin} was switched");
+        Command::new(foundry_dir.join(format!("bin/{bin}{EXE_SUFFIX}")))
+            .env("FOUNDRY_DIR", &foundry_dir)
+            .arg("-V")
+            .assert()
+            .success()
+            .stdout_eq(format!("{bin} v1.0.0\n"));
     }
 }
 
-// On unix, `--use` activates a version by symlinking it into the bin dir.
+// On unix, `--use` symlinks each binary in the bin dir to foundryup, which proxies it.
 #[cfg(unix)]
 #[test]
 fn use_version_creates_symlink_on_unix() {
@@ -495,11 +503,12 @@ fn use_version_creates_symlink_on_unix() {
 
     foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["--use", "1.5.0"]).assert().success();
 
+    let foundryup = std::fs::canonicalize(snapbox::cmd::cargo_bin!("foundryup")).unwrap();
     for &bin in BINS {
         let dest = foundry_dir.join("bin").join(bin);
         let meta = std::fs::symlink_metadata(&dest).unwrap();
         assert!(meta.file_type().is_symlink(), "{bin} should be a symlink");
-        assert_eq!(std::fs::read_link(&dest).unwrap(), version_dir.join(bin));
+        assert_eq!(std::fs::canonicalize(&dest).unwrap(), foundryup);
     }
 }
 

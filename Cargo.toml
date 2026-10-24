@@ -85,6 +85,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing = "0.1"
 color-eyre = "0.6.5"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+
 [dev-dependencies]
 snapbox = "1.2"
 tokio = { version = "1", features = ["test-util", "net"] }

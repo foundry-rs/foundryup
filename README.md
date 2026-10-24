@@ -14,6 +14,24 @@ foundryup
 
 See [**The Foundry Book**](https://getfoundry.sh/) for documentation on installing and using *foundryup*.
 
+## Toolchain selection
+
+Like rustup, *foundryup* links `forge`, `cast`, `anvil`, `chisel`, and `solar` in `~/.foundry/bin`
+to itself and runs them from the selected installed version:
+
+```bash
+forge +nightly test
+cast +1.5.0 call ...
+FOUNDRYUP_TOOLCHAIN=stable forge build
+```
+
+A leading `+<version>` argument picks the version for one command and for the Foundry binaries
+that command runs. `stable` (or `latest`) selects the newest installed release, `nightly` the most
+recently installed nightly, and other names match the installed versions as `foundryup --use`
+does. Without it, the `FOUNDRYUP_TOOLCHAIN` environment variable or else the version last
+activated by `foundryup` or `foundryup --use` runs. Versions are never downloaded on demand;
+install them first with `foundryup --install <version>`.
+
 ## Release verification
 
 Prebuilt releases from `v1.3.0-rc1` onward require a valid Sigstore bundle signed by the
