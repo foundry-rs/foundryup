@@ -75,6 +75,7 @@ sigstore-verify = { version = "0.11", default-features = false }
 sysinfo = "0.36"
 tar = "0.4"
 tempfile = "3"
+same-file = "1"
 self-replace = "1"
 time = { version = "0.3", features = ["parsing"] }
 which = "8"
@@ -84,6 +85,9 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing = "0.1"
 color-eyre = "0.6.5"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
 
 [dev-dependencies]
 snapbox = "1.2"

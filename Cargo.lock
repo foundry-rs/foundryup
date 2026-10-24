@@ -699,6 +699,7 @@ dependencies = [
  "itertools",
  "quick-xml",
  "reqwest",
+ "same-file",
  "self-replace",
  "semver",
  "serde_json",
@@ -714,6 +715,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "which",
+ "windows-sys 0.61.2",
  "zip",
 ]
 
