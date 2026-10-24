@@ -1,0 +1,6 @@
+self-hosted-runner:
+  labels:
+    - depot-ubuntu-22.04
+    - depot-ubuntu-22.04-arm
+    - depot-ubuntu-latest
+    - depot-windows-latest

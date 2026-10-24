@@ -1,7 +1,8 @@
-use snapbox::{cmd::Command, str};
+use snapbox::{assert_data_eq, cmd::Command, str};
 use std::env::consts::EXE_SUFFIX;
 
 const BINS: &[&str] = &["forge", "cast", "anvil", "chisel"];
+const OPTIONAL_BINS: &[&str] = &["solar"];
 
 mod foundry_bins;
 mod installer_script;
@@ -16,9 +17,15 @@ fn foundryup() -> Command {
 /// Activation now runs `<bin> -V` and fails if it cannot execute, so test
 /// fixtures need real executables rather than placeholder text. We reuse the
 /// `foundryup` test binary, which exits 0 and prints a version for `-V` on every
-/// platform (and copying it preserves the executable bit on Unix).
+/// platform. Linking avoids copying the debug test binary for every fake bin.
 fn write_fake_bin(path: &std::path::Path) {
-    std::fs::copy(snapbox::cmd::cargo_bin!("foundryup"), path).unwrap();
+    let source = snapbox::cmd::cargo_bin!("foundryup");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(source, path).unwrap();
+    #[cfg(windows)]
+    std::fs::hard_link(source, path).unwrap();
+    #[cfg(not(any(unix, windows)))]
+    std::fs::copy(source, path).unwrap();
 }
 
 #[test]
@@ -72,7 +79,7 @@ Options:
           Cargo features to enable for building
 
   -f, --force
-          Skip SHA verification (INSECURE)
+          Skip Sigstore and SHA verification (INSECURE)
 
       --arch <ARCH>
           Install a specific architecture (amd64, arm64)
@@ -118,13 +125,17 @@ foundryup [..]
 
 #[test]
 fn completions_bash() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_foundryup"))
-        .args(["--completions", "bash"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("_foundryup"), "expected _foundryup in completions");
+    let assert = foundryup().args(["--completions", "bash"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert_data_eq!(
+        stdout.as_ref(),
+        str![[r#"
+...
+_foundryup()[..]
+...
+
+"#]]
+    );
 }
 
 #[test]
@@ -133,6 +144,29 @@ fn conflicting_args() {
 error: the argument '--pr <PR>' cannot be used with '--branch <BRANCH>'
 
 Usage: foundryup[EXE] --pr <PR>
+
+For more information, try '--help'.
+
+"#]]);
+}
+
+// `--update` is handled before the `--list`/`--use` command modes, so combining
+// them must error at parse time instead of silently self-updating.
+#[test]
+fn update_conflicts_with_list_and_use() {
+    foundryup().args(["--list", "--update"]).assert().failure().stderr_eq(str![[r#"
+error: the argument '--list' cannot be used with '--update'
+
+Usage: foundryup[EXE] --list
+
+For more information, try '--help'.
+
+"#]]);
+
+    foundryup().args(["--use", "v1.0.0", "--update"]).assert().failure().stderr_eq(str![[r#"
+error: the argument '--use <VERSION>' cannot be used with '--update'
+
+Usage: foundryup[EXE] --use <VERSION>
 
 For more information, try '--help'.
 
@@ -215,6 +249,53 @@ fn use_version_normalizes_bare_semver() {
 "#]]);
 
     for &bin in BINS {
+        let name = format!("{bin}{EXE_SUFFIX}");
+        assert!(foundry_dir.join("bin").join(&name).exists(), "{name} was not activated");
+    }
+}
+
+#[test]
+fn use_version_allows_missing_optional_bin() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+    let version_dir = foundry_dir.join("versions/foundry-rs/foundry/v1.5.0");
+    let bin_dir = foundry_dir.join("bin");
+    std::fs::create_dir_all(&version_dir).unwrap();
+    std::fs::create_dir_all(&bin_dir).unwrap();
+
+    for bin in BINS {
+        write_fake_bin(&version_dir.join(format!("{bin}{EXE_SUFFIX}")));
+    }
+    for bin in OPTIONAL_BINS {
+        write_fake_bin(&bin_dir.join(format!("{bin}{EXE_SUFFIX}")));
+    }
+
+    foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["--use", "1.5.0"]).assert().success();
+
+    for &bin in BINS {
+        let name = format!("{bin}{EXE_SUFFIX}");
+        assert!(bin_dir.join(&name).exists(), "{name} was not activated");
+    }
+    for &bin in OPTIONAL_BINS {
+        let name = format!("{bin}{EXE_SUFFIX}");
+        assert!(!bin_dir.join(&name).exists(), "{name} should have been cleared");
+    }
+}
+
+#[test]
+fn use_version_activates_optional_bin_when_present() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+    let version_dir = foundry_dir.join("versions/foundry-rs/foundry/v1.5.0");
+    std::fs::create_dir_all(&version_dir).unwrap();
+
+    for bin in BINS.iter().chain(OPTIONAL_BINS) {
+        write_fake_bin(&version_dir.join(format!("{bin}{EXE_SUFFIX}")));
+    }
+
+    foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["--use", "1.5.0"]).assert().success();
+
+    for &bin in OPTIONAL_BINS {
         let name = format!("{bin}{EXE_SUFFIX}");
         assert!(foundry_dir.join("bin").join(&name).exists(), "{name} was not activated");
     }
@@ -307,6 +388,98 @@ fn use_version_ambiguous_across_repos_errors() {
 "#]]);
 }
 
+// A `--use` that fails on a missing binary must not leave a partially-switched
+// toolchain: the previously active version stays fully active.
+#[cfg(unix)]
+#[test]
+fn use_version_missing_bin_leaves_previous_active() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+    let good_dir = foundry_dir.join("versions/foundry-rs/foundry/v1.0.0");
+    let broken_dir = foundry_dir.join("versions/foundry-rs/foundry/v2.0.0");
+    std::fs::create_dir_all(&good_dir).unwrap();
+    std::fs::create_dir_all(&broken_dir).unwrap();
+
+    // v1.0.0 is complete; v2.0.0 is missing `chisel`.
+    for bin in BINS {
+        write_fake_bin(&good_dir.join(format!("{bin}{EXE_SUFFIX}")));
+    }
+    for bin in BINS.iter().filter(|b| **b != "chisel") {
+        write_fake_bin(&broken_dir.join(format!("{bin}{EXE_SUFFIX}")));
+    }
+
+    // Activate the good version.
+    foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["--use", "1.0.0"]).assert().success();
+
+    // Attempting to switch to the broken version fails...
+    foundryup()
+        .env("FOUNDRY_DIR", &foundry_dir)
+        .args(["--use", "2.0.0"])
+        .assert()
+        .failure()
+        .stderr_eq(str![[r#"
+...
+[..]binary chisel not found[..]
+...
+"#]]);
+
+    // ...and every active binary must still point at v1.0.0, not a mix.
+    let bin_dir = foundry_dir.join("bin");
+    for &bin in BINS {
+        let active = bin_dir.join(format!("{bin}{EXE_SUFFIX}"));
+        let target = std::fs::read_link(&active)
+            .unwrap_or_else(|e| panic!("{bin} is not an active symlink: {e}"));
+        assert_eq!(target, good_dir.join(format!("{bin}{EXE_SUFFIX}")), "{bin} was switched");
+    }
+}
+
+// A `--use` that fails on a broken (present but non-runnable) binary must also
+// leave the previously active version fully active, not a partial switch.
+#[cfg(unix)]
+#[test]
+fn use_version_broken_bin_leaves_previous_active() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+    let good_dir = foundry_dir.join("versions/foundry-rs/foundry/v1.0.0");
+    let broken_dir = foundry_dir.join("versions/foundry-rs/foundry/v2.0.0");
+    std::fs::create_dir_all(&good_dir).unwrap();
+    std::fs::create_dir_all(&broken_dir).unwrap();
+
+    // v1.0.0 is complete; v2.0.0 has all files but `chisel` is not runnable.
+    for bin in BINS {
+        write_fake_bin(&good_dir.join(format!("{bin}{EXE_SUFFIX}")));
+    }
+    for bin in BINS.iter().filter(|b| **b != "chisel") {
+        write_fake_bin(&broken_dir.join(format!("{bin}{EXE_SUFFIX}")));
+    }
+    // A present-but-non-executable file: exists, but fails to run.
+    std::fs::write(broken_dir.join(format!("chisel{EXE_SUFFIX}")), b"not an executable").unwrap();
+
+    // Activate the good version.
+    foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["--use", "1.0.0"]).assert().success();
+
+    // Attempting to switch to the broken version fails...
+    foundryup()
+        .env("FOUNDRY_DIR", &foundry_dir)
+        .args(["--use", "2.0.0"])
+        .assert()
+        .failure()
+        .stderr_eq(str![[r#"
+...
+[..]failed to run chisel[..]
+...
+"#]]);
+
+    // ...and every active binary must still point at v1.0.0, not a mix.
+    let bin_dir = foundry_dir.join("bin");
+    for &bin in BINS {
+        let active = bin_dir.join(format!("{bin}{EXE_SUFFIX}"));
+        let target = std::fs::read_link(&active)
+            .unwrap_or_else(|e| panic!("{bin} is not an active symlink: {e}"));
+        assert_eq!(target, good_dir.join(format!("{bin}{EXE_SUFFIX}")), "{bin} was switched");
+    }
+}
+
 // On unix, `--use` activates a version by symlinking it into the bin dir.
 #[cfg(unix)]
 #[test]
@@ -376,7 +549,24 @@ foundryup: foundry-rs/foundry v1.0.0
     ]);
 }
 
-// A version directory missing a binary fails the listing.
+#[test]
+fn list_includes_optional_bin_when_present() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+    let version_dir = foundry_dir.join("versions/foundry-rs/foundry/v1.0.0");
+    std::fs::create_dir_all(&version_dir).unwrap();
+
+    for bin in BINS.iter().chain(OPTIONAL_BINS) {
+        write_fake_bin(&version_dir.join(format!("{bin}{EXE_SUFFIX}")));
+    }
+
+    let assert = foundryup().env("FOUNDRY_DIR", &foundry_dir).arg("--list").assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let bin_count = stdout.lines().filter(|line| line.starts_with("foundryup: - ")).count();
+    assert_eq!(bin_count, BINS.len() + OPTIONAL_BINS.len());
+}
+
+// A version directory missing a required binary fails the listing.
 #[test]
 fn list_fails_on_broken_install() {
     let temp_dir = tempfile::Builder::new().tempdir().unwrap();
@@ -431,4 +621,35 @@ foundryup: migrating legacy version [..]
     assert!(!versions_dir.join("stable").exists());
     assert!(versions_dir.join("foundry-rs/foundry/nightly").exists());
     assert!(versions_dir.join("foundry-rs/foundry/stable").exists());
+}
+
+#[test]
+fn migrate_legacy_versions_skips_existing_target() {
+    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+    let foundry_dir = temp_dir.path().join(".foundry");
+    let versions_dir = foundry_dir.join("versions");
+    let legacy_dir = versions_dir.join("nightly");
+    let version_dir = versions_dir.join("foundry-rs/foundry/nightly");
+
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    std::fs::create_dir_all(&version_dir).unwrap();
+
+    for bin in BINS {
+        write_fake_bin(&legacy_dir.join(format!("{bin}{EXE_SUFFIX}")));
+        write_fake_bin(&version_dir.join(format!("{bin}{EXE_SUFFIX}")));
+    }
+
+    foundryup()
+        .env("FOUNDRY_DIR", &foundry_dir)
+        .arg("--list")
+        .assert()
+        .success()
+        .stdout_eq(str![[r#"
+foundryup: foundry-rs/foundry nightly
+...
+"#]])
+        .stderr_eq("");
+
+    assert!(legacy_dir.exists());
+    assert!(version_dir.exists());
 }

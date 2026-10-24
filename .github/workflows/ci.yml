@@ -21,6 +21,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     permissions:
+      id-token: write
       contents: read
     strategy:
       fail-fast: false
@@ -42,7 +43,7 @@ jobs:
             target: aarch64-unknown-linux-musl
             platform: alpine
             arch: arm64
-          - os: macos-14
+          - os: macos-15-large
             target: x86_64-apple-darwin
             platform: darwin
             arch: amd64
@@ -55,11 +56,14 @@ jobs:
             platform: win32
             arch: amd64
     steps:
-      - uses: actions/checkout@v6
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@d5402286a7abdfb7232173b3228d56473feb8a66 # 2026-09-29T02-04-45Z-d5402286
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@d5402286a7abdfb7232173b3228d56473feb8a66 # 2026-09-29T02-04-45Z-d5402286
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
       - name: Install musl-tools
         if: contains(matrix.target, 'musl')
@@ -69,16 +73,20 @@ jobs:
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
             sudo apt-get install -y gcc-aarch64-linux-gnu
           fi
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
           cache-targets: false
           prefix-key: v1-rust
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        with:
+          tool: nextest@0.9.140
+          checksum: true
+          fallback: none
       - name: Build
-        run: cargo build --target ${{ matrix.target }}
+        run: cargo build --locked --target ${{ matrix.target }}
       - name: Test
-        run: cargo nextest run --no-fail-fast --target ${{ matrix.target }}
+        run: cargo nextest run --locked --no-fail-fast --target ${{ matrix.target }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -86,20 +94,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
+      id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@d5402286a7abdfb7232173b3228d56473feb8a66 # 2026-09-29T02-04-45Z-d5402286
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: crate-ci/typos@cf5f1c29a8ac336af8568821ec41919923b05a83 # v1
+      - uses: crate-ci/typos@cf5f1c29a8ac336af8568821ec41919923b05a83 # v1.45.1
 
   shellcheck:
     runs-on: depot-ubuntu-latest
     timeout-minutes: 5
     permissions:
+      id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@d5402286a7abdfb7232173b3228d56473feb8a66 # 2026-09-29T02-04-45Z-d5402286
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Shellcheck
@@ -110,20 +124,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
+      id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@d5402286a7abdfb7232173b3228d56473feb8a66 # 2026-09-29T02-04-45Z-d5402286
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # master
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@d5402286a7abdfb7232173b3228d56473feb8a66 # 2026-09-29T02-04-45Z-d5402286
         with:
           toolchain: nightly
           components: clippy
-      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+      - uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-      - run: cargo clippy --workspace --all-targets --all-features
+      - run: cargo +nightly clippy --locked --workspace --all-targets --all-features
         env:
           RUSTFLAGS: -Dwarnings
 
@@ -131,16 +148,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
+      id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@d5402286a7abdfb7232173b3228d56473feb8a66 # 2026-09-29T02-04-45Z-d5402286
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # master
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@d5402286a7abdfb7232173b3228d56473feb8a66 # 2026-09-29T02-04-45Z-d5402286
         with:
           toolchain: nightly
           components: rustfmt
-      - run: cargo fmt --all --check
+      - run: cargo +nightly fmt --all --check
 
   ci-success:
     runs-on: ubuntu-latest
@@ -154,6 +174,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Decide whether the needed jobs succeeded or failed
-        uses: re-actors/alls-green@release/v1
+        uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
           jobs: ${{ toJSON(needs) }}

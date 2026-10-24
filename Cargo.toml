@@ -2,7 +2,7 @@
 name = "foundryup"
 version = "2.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/foundry-rs/foundryup"
@@ -30,8 +30,16 @@ inherits = "release"
 lto = "fat"
 codegen-units = 1
 
+[profile.dev.package]
+crc32fast.opt-level = 3
+flate2.opt-level = 3
+miniz_oxide.opt-level = 3
+tar.opt-level = 3
+zip.opt-level = 3
+zlib-rs.opt-level = 3
+
 [build-dependencies]
-vergen-gitcl = { version = "1", features = ["build", "rustc"] }
+smolgen = { version = "0.1", features = ["build", "gitcl", "rustc"] }
 
 [dependencies]
 # async
@@ -40,7 +48,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     "gzip",
     "stream",
 ] }
-tokio = { version = "1", features = ["rt-multi-thread", "fs", "process", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "process", "io-util", "time"] }
 futures-util = "0.3"
 
 # cli
@@ -51,22 +59,26 @@ clap_complete = "4"
 eyre = "0.6"
 
 # misc
-base64 = "0.22"
+base64 = "0.23"
 flate2 = "1"
 fs-err = "3"
 hex = "0.4"
 home = "0.5"
 indicatif = "0.18"
+itertools = "0.15"
+quick-xml = "0.41"
 semver = "1"
 serde_json = "1"
 digest-io = "0.1"
 sha2 = "0.11"
+sigstore-verify = { version = "0.11", default-features = false }
 sysinfo = "0.36"
 tar = "0.4"
 tempfile = "3"
 self-replace = "1"
+time = { version = "0.3", features = ["parsing"] }
 which = "8"
-zip = { version = "7", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 # tracing
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -75,3 +87,4 @@ color-eyre = "0.6.5"
 
 [dev-dependencies]
 snapbox = "1.2"
+tokio = { version = "1", features = ["test-util", "net"] }

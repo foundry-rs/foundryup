@@ -1,13 +1,25 @@
 use crate::{
     cli::Cli,
-    config::Config,
-    download::{Downloader, compute_sha256, extract_tar_gz, extract_zip},
+    config::{Bin, Config},
+    download::{Downloader, RetryableValidationError, compute_sha256, extract_tar_gz, extract_zip},
     platform::{Platform, Target},
     say, tell, warn,
 };
 use eyre::{Result, WrapErr, bail};
 use fs_err as fs;
-use std::{collections::HashMap, path::Path};
+use itertools::Itertools;
+use quick_xml::{Reader, XmlVersion, events::Event, name::QName};
+use semver::Version;
+use sigstore_verify::{
+    VerificationPolicy,
+    trust_root::{SIGSTORE_PRODUCTION_TRUSTED_ROOT, TrustedRoot},
+    types::{Bundle, Sha256Hash},
+};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 pub(crate) async fn run(config: &Config, args: &Cli) -> Result<()> {
     config.ensure_dirs()?;
@@ -33,16 +45,18 @@ async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
 
     let downloader = Downloader::new()?;
 
+    let target = Target::detect(args.platform.as_deref(), args.arch.as_deref())?;
+    let nightly_archive = archive_name(config, "nightly", &target);
+
     let (version, tag) = resolve_version_and_tag(
         &downloader,
         repo,
         args.version.as_deref().unwrap_or(config.network.default_version),
+        &nightly_archive,
     )
     .await?;
 
     say!("installing {} (version {version}, tag {tag})", config.network.display_name);
-
-    let target = Target::detect(args.platform.as_deref(), args.arch.as_deref())?;
 
     let release_url =
         format!("https://github.com/{}/releases/download/{tag}/", config.network.repo);
@@ -67,16 +81,29 @@ async fn install_prebuilt(config: &Config, args: &Cli) -> Result<()> {
 
     // A verified cache hit is already activated; return so `main` can still
     // print the foundryup self-update check instead of exiting the process here.
-    let hashes = match check {
+    let attestation = match check {
         PrebuiltCheck::AlreadyActivated => return Ok(()),
-        PrebuiltCheck::Download(hashes) => hashes,
+        PrebuiltCheck::Download(attestation) => attestation,
     };
 
-    download_and_extract(config, repo, &downloader, &release_url, &version, &tag, &target).await?;
+    let archive_name = archive_name(config, &version, &target);
+    let archive_hash = attestation
+        .as_ref()
+        .map(|attestation| expected_hash(&attestation.hashes, &archive_name, &archive_name))
+        .transpose()?
+        .flatten()
+        .map(String::as_str);
+    let extracted =
+        download_and_extract(&downloader, &release_url, &archive_name, &target, archive_hash)
+            .await?;
 
-    if let Some(ref hashes) = hashes {
-        verify_installed_binaries(config, repo, &tag, hashes)?;
+    if let Some(ref attestation) = attestation {
+        verify_binaries(config, &extracted.path, &attestation.hashes)?;
+    } else {
+        validate_extracted_binaries(config, &extracted.path)?;
     }
+
+    replace_version_bins_from_dir(config, repo, &tag, &extracted.path)?;
 
     download_manpages(config, &downloader, &release_url, &version).await;
 
@@ -101,56 +128,32 @@ async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> R
 
     say!("installing from {}", local_path.display());
 
-    let mut cmd = tokio::process::Command::new("cargo");
-    cmd.arg("build")
-        .arg("--bins")
-        .arg("--profile")
-        .arg(&args.cargo_profile)
-        .current_dir(local_path);
-    cmd.env("RUSTFLAGS", rustflags());
+    let built = build_bins(config, local_path, args).await?;
 
-    if let Some(jobs) = args.jobs {
-        cmd.arg("--jobs").arg(jobs.to_string());
-    }
-    if let Some(ref features) = args.cargo_features {
-        cmd.arg("--features").arg(features);
-    }
+    for &Bin { optional, name: bin } in config.network.bins {
+        let src = built_bin_path(&built, bin);
+        if src.is_file() {
+            let dest = config.bin_path(bin);
+            clear_active_bin(config, bin)?;
 
-    let status = cmd.status().await.wrap_err("failed to run cargo build")?;
-    if !status.success() {
-        bail!("cargo build failed");
-    }
-
-    let target_dir = profile_target_dir(&args.cargo_profile);
-    for bin in config.network.bins {
-        let src = local_path.join("target").join(target_dir).join(bin_name(bin));
-        let dest = config.bin_path(bin);
-
-        remove_if_exists(&dest)?;
-
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&src, &dest)?;
-        #[cfg(windows)]
-        fs::copy(&src, &dest)?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(src, &dest)?;
+            #[cfg(windows)]
+            fs::copy(src, &dest)?;
+        } else if optional {
+            clear_active_bin(config, bin)?;
+        } else {
+            bail!("binary {bin} not found at {}", src.display());
+        }
     }
 
     say!("done");
     Ok(())
 }
 
-fn profile_target_dir(profile: &str) -> &str {
-    if profile == "dev" { "debug" } else { profile }
-}
-
 async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<()> {
     need_cmd("git")?;
     need_cmd("cargo")?;
-
-    let branch = if let Some(pr) = args.pr {
-        format!("refs/pull/{pr}/head")
-    } else {
-        args.branch.clone().unwrap_or_else(|| "master".to_string())
-    };
 
     let repo_path = config.repo_dir(repo);
     let author = repo.split('/').next().unwrap_or(repo);
@@ -169,6 +172,23 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
             bail!("git clone failed");
         }
     }
+
+    let branch = if let Some(pr) = args.pr {
+        format!("refs/pull/{pr}/head")
+    } else if let Some(branch) = &args.branch {
+        branch.clone()
+    } else {
+        // `git clone` records the remote's default branch as `origin/HEAD`.
+        let output = tokio::process::Command::new("git")
+            .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+            .current_dir(&repo_path)
+            .output()
+            .await?;
+        if !output.status.success() {
+            bail!("could not resolve the default branch of origin");
+        }
+        String::from_utf8_lossy(&output.stdout).trim().trim_start_matches("origin/").to_string()
+    };
 
     say!("fetching {branch}...");
     let status = tokio::process::Command::new("git")
@@ -211,12 +231,33 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
 
     say!("installing version {version}");
 
+    let built = build_bins(config, &repo_path, args).await?;
+
+    let version_dir = config.version_dir(repo, &version);
+    fs::create_dir_all(&version_dir)?;
+
+    copy_built_bins_to_version_dir(config, &built, &version_dir)?;
+
+    use_version(config, repo, &version)?;
+
+    generate_manpages_from_source(config).await?;
+
+    say!("done");
+
+    Ok(())
+}
+
+#[derive(Debug)]
+struct BuiltBins {
+    build_dir: PathBuf,
+}
+
+async fn build_bins(config: &Config, repo_path: &Path, args: &Cli) -> Result<BuiltBins> {
+    let built = BuiltBins { build_dir: cargo_build_dir(repo_path, &args.cargo_profile) };
+    clear_built_bins(config, &built.build_dir)?;
+
     let mut cmd = tokio::process::Command::new("cargo");
-    cmd.arg("build")
-        .arg("--bins")
-        .arg("--profile")
-        .arg(&args.cargo_profile)
-        .current_dir(&repo_path);
+    cmd.arg("build").arg("--bins").arg("--profile").arg(&args.cargo_profile).current_dir(repo_path);
     cmd.env("RUSTFLAGS", rustflags());
 
     if let Some(jobs) = args.jobs {
@@ -231,30 +272,45 @@ async fn install_from_source(config: &Config, repo: &str, args: &Cli) -> Result<
         bail!("cargo build failed");
     }
 
-    let version_dir = config.version_dir(repo, &version);
-    fs::create_dir_all(&version_dir)?;
+    Ok(built)
+}
 
-    let target_dir = profile_target_dir(&args.cargo_profile);
-    let build_dir = repo_path.join("target").join(target_dir);
-    for bin in config.network.bins {
-        // Move whichever artifact cargo produced (with or without `.exe`).
-        for candidate in [bin.to_string(), format!("{bin}.exe")] {
-            let src = build_dir.join(&candidate);
-            if src.is_file() {
-                // Remove any existing destination first; `fs::rename` fails on
-                // Windows if the target already exists.
-                let dest = version_dir.join(&candidate);
-                remove_if_exists(&dest)?;
-                fs::rename(&src, &dest)?;
-            }
+fn cargo_build_dir(repo_path: &Path, profile: &str) -> PathBuf {
+    repo_path.join("target").join(profile_target_dir(profile))
+}
+
+fn profile_target_dir(profile: &str) -> &str {
+    if profile == "dev" { "debug" } else { profile }
+}
+
+fn built_bin_path(built: &BuiltBins, bin: &str) -> PathBuf {
+    built.build_dir.join(bin_name(bin))
+}
+
+fn clear_built_bins(config: &Config, build_dir: &Path) -> Result<()> {
+    for &Bin { name: bin, .. } in config.network.bins {
+        remove_if_exists(&build_dir.join(bin_name(bin)))?;
+    }
+    Ok(())
+}
+
+fn copy_built_bins_to_version_dir(
+    config: &Config,
+    built: &BuiltBins,
+    version_dir: &Path,
+) -> Result<()> {
+    clear_version_bins(config, version_dir)?;
+
+    for &Bin { optional, name: bin } in config.network.bins {
+        let src = built_bin_path(built, bin);
+        if src.is_file() {
+            let dest = version_dir.join(bin_name(bin));
+            remove_if_exists(&dest)?;
+            fs::copy(src, &dest)?;
+        } else if !optional {
+            bail!("binary {bin} not found at {}", src.display());
         }
     }
-
-    use_version(config, repo, &version)?;
-
-    generate_manpages_from_source(config).await?;
-
-    say!("done");
 
     Ok(())
 }
@@ -267,8 +323,12 @@ async fn generate_manpages_from_source(config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    for bin in config.network.bins {
+    for &Bin { name: bin, .. } in config.network.bins {
         let bin_path = config.bin_path(bin);
+        if !bin_path.is_file() {
+            continue;
+        }
+
         let man_path = config.man_dir.join(format!("{bin}.1"));
 
         // Create/truncate the destination first, matching the shell's `> file`.
@@ -291,14 +351,20 @@ async fn generate_manpages_from_source(config: &Config) -> Result<()> {
 }
 
 /// Outcome of the pre-download attestation check for a prebuilt install.
+#[derive(Debug)]
 enum PrebuiltCheck {
     /// The requested version was already installed and verified, and has been
     /// activated. The caller should finish without downloading anything.
     AlreadyActivated,
-    /// The binaries must be downloaded. The optional hashes are used to verify
-    /// them afterwards (`None` when the release has no attestation).
-    Download(Option<HashMap<String, String>>),
+    /// The binaries must be downloaded. The optional attestation is used to verify
+    /// them afterwards (`None` for releases predating mandatory attestations).
+    Download(Option<ReleaseAttestation>),
 }
+
+/// The first Foundry release that published Sigstore attestations.
+const FIRST_ATTESTED_VERSION: &str = "1.3.0-rc1";
+const GITHUB_ACTIONS_ISSUER: &str = "https://token.actions.githubusercontent.com";
+const RELEASE_WORKFLOW: &str = ".github/workflows/release.yml";
 
 async fn fetch_and_verify_attestation(
     config: &Config,
@@ -310,7 +376,10 @@ async fn fetch_and_verify_attestation(
     target: &Target,
 ) -> Result<PrebuiltCheck> {
     let bins = config.network.bins;
-    say!("checking if {} for {tag} version are already installed", bins.join(", "));
+    say!(
+        "checking if {} for {tag} version are already installed",
+        bins.iter().map(|bin| bin.name).format(", ")
+    );
 
     let attestation_url = format!(
         "{release_url}foundry_{version}_{platform}_{arch}.attestation.txt",
@@ -318,68 +387,144 @@ async fn fetch_and_verify_attestation(
         arch = target.arch.as_str()
     );
 
-    // A 404 (genuinely absent attestation) skips verification. Transport failures and other HTTP
-    // errors are propagated so a network blip aborts the install rather than silently
-    // downgrading to an unverified binary.
+    // A 404 is only accepted for releases that predate attestations. Transport failures and other
+    // HTTP errors are propagated so a network blip cannot downgrade the install.
     let attestation_link = match downloader.download_to_string_optional(&attestation_url).await? {
         Some(content) => {
             let link = content.lines().next().unwrap_or("").trim().to_string();
             if link.is_empty() || link.contains("Not Found") {
-                say!("no attestation found for this release, skipping SHA verification");
-                return Ok(PrebuiltCheck::Download(None));
+                return missing_attestation(tag);
             }
             link
         }
-        None => {
-            say!("no attestation found for this release, skipping SHA verification");
-            return Ok(PrebuiltCheck::Download(None));
-        }
+        None => return missing_attestation(tag),
     };
 
     say!("found attestation for {tag} version, downloading attestation artifact, checking...");
 
     let artifact_url = format!("{attestation_link}/download");
-    let artifact_json = downloader.download_to_string(&artifact_url).await?;
-
-    let hashes = parse_attestation_payload(&artifact_json)?;
+    let attestation = download_attestation(downloader, &artifact_url, bins, repo, tag).await?;
 
     let version_dir = config.version_dir(repo, tag);
 
-    if version_dir.exists() {
-        let mut all_match = true;
-        for bin in bins {
-            let bin_name = bin_name(bin);
-            let expected = hashes.get(*bin).or_else(|| hashes.get(&bin_name));
-            let path = version_dir.join(&bin_name);
-
-            match expected {
-                Some(expected_hash) if is_executable(&path) => {
-                    let actual = compute_sha256(&path)?;
-                    if actual != *expected_hash {
-                        all_match = false;
-                        break;
-                    }
-                }
-                _ => {
-                    all_match = false;
-                    break;
-                }
+    if !version_dir.exists() {
+        say!("version {tag} is not installed, downloading binaries");
+    } else {
+        match installed_bins_status(config, &version_dir, &attestation.hashes)? {
+            InstalledBinsStatus::Verified => {
+                say!("version {tag} already installed and verified, activating...");
+                use_version(config, repo, tag)?;
+                say!("done!");
+                return Ok(PrebuiltCheck::AlreadyActivated);
             }
-        }
-
-        if all_match {
-            say!("version {tag} already installed and verified, activating...");
-            use_version(config, repo, tag)?;
-            say!("done!");
-            return Ok(PrebuiltCheck::AlreadyActivated);
+            InstalledBinsStatus::Missing(bin) => {
+                say!(
+                    "installed version {tag} is incomplete (missing {bin}), downloading and verifying a fresh copy"
+                );
+            }
+            InstalledBinsStatus::NonExecutable(bin) => {
+                say!(
+                    "installed version {tag} is incomplete ({bin} is not executable), downloading and verifying a fresh copy"
+                );
+            }
+            InstalledBinsStatus::HashError(bin) => {
+                bail!(
+                    "installed version {tag} cannot be verified (could not calculate a hash for {bin}), aborting installation"
+                );
+            }
+            InstalledBinsStatus::HashMismatch(bin) => {
+                say!(
+                    "installed version {tag} did not pass SHA-256 verification ({bin}), downloading and verifying a fresh copy"
+                );
+            }
+            InstalledBinsStatus::Unverifiable(bin) => {
+                say!(
+                    "installed version {tag} cannot be verified (no expected hash for {bin}), downloading a fresh copy"
+                );
+            }
         }
     }
 
-    say!("binaries not found or do not match expected hashes, downloading new binaries");
-    Ok(PrebuiltCheck::Download(Some(hashes)))
+    Ok(PrebuiltCheck::Download(Some(attestation)))
 }
 
-fn parse_attestation_payload(json: &str) -> Result<HashMap<String, String>> {
+fn missing_attestation(tag: &str) -> Result<PrebuiltCheck> {
+    if attestation_required(tag) {
+        bail!(
+            "release {tag} requires a Sigstore attestation; refusing to download unverified binaries"
+        );
+    }
+
+    say!("no attestation found for legacy release {tag}, skipping SHA verification");
+    Ok(PrebuiltCheck::Download(None))
+}
+
+fn attestation_required(tag: &str) -> bool {
+    if tag == "nightly" || tag.starts_with("nightly-") {
+        return true;
+    }
+
+    let Some(version) = tag.strip_prefix('v').and_then(|tag| Version::parse(tag).ok()) else {
+        // Only recognized legacy semver tags are grandfathered. Unknown tag
+        // formats must fail closed instead of silently skipping verification.
+        return true;
+    };
+    version >= Version::parse(FIRST_ATTESTED_VERSION).expect("valid attestation cutoff")
+}
+
+#[derive(Debug)]
+struct ReleaseAttestation {
+    hashes: HashMap<String, String>,
+}
+
+async fn download_attestation(
+    downloader: &Downloader,
+    artifact_url: &str,
+    bins: &[Bin],
+    repo: &str,
+    tag: &str,
+) -> Result<ReleaseAttestation> {
+    downloader
+        .download_and_validate(artifact_url, |artifact_json| {
+            validate_attestation(&artifact_json, bins, repo, tag)
+        })
+        .await
+}
+
+fn validate_attestation(
+    artifact_json: &str,
+    bins: &[Bin],
+    repo: &str,
+    tag: &str,
+) -> Result<ReleaseAttestation> {
+    let payload = parse_attestation_payload(artifact_json)?;
+    let missing = missing_attestation_bins(bins, &payload.hashes)?;
+    if !missing.is_empty() {
+        return Err(RetryableValidationError(format!(
+            "attestation for {tag} is missing SHA-256 hashes for {}; available subjects: {}",
+            missing.join(", "),
+            format_subjects(&payload.subjects)
+        ))
+        .into());
+    }
+    let verification_digest = payload
+        .verification_digest
+        .as_deref()
+        .ok_or_else(|| eyre::eyre!("attestation payload has no SHA-256 subject digest"))?;
+    verify_attestation_bundle(artifact_json, verification_digest, repo, tag)?;
+    verify_nightly_source_commit(&payload, repo, tag)?;
+    Ok(ReleaseAttestation { hashes: payload.hashes })
+}
+
+#[derive(Debug)]
+struct AttestationPayload {
+    hashes: HashMap<String, String>,
+    subjects: Vec<String>,
+    verification_digest: Option<String>,
+    source_dependencies: Vec<(String, String)>,
+}
+
+fn parse_attestation_payload(json: &str) -> Result<AttestationPayload> {
     let parsed: serde_json::Value = serde_json::from_str(json)?;
     let payload_b64 = parsed["dsseEnvelope"]["payload"]
         .as_str()
@@ -389,59 +534,250 @@ fn parse_attestation_payload(json: &str) -> Result<HashMap<String, String>> {
         base64::Engine::decode(&base64::engine::general_purpose::STANDARD, payload_b64)?;
     let payload_json: serde_json::Value = serde_json::from_slice(&payload_bytes)?;
 
+    if payload_json["_type"] != "https://in-toto.io/Statement/v1" {
+        bail!("attestation payload is not an in-toto Statement v1");
+    }
+    if payload_json["predicateType"] != "https://slsa.dev/provenance/v1" {
+        bail!("attestation payload is not SLSA provenance v1");
+    }
+
     let mut hashes = HashMap::new();
+    let mut subjects = Vec::new();
 
     if let Some(subject) = payload_json["subject"].as_array() {
         for entry in subject {
-            if let (Some(name), Some(digest)) =
-                (entry["name"].as_str(), entry["digest"]["sha256"].as_str())
-            {
-                hashes.insert(name.to_string(), digest.to_string());
+            if let Some(name) = entry["name"].as_str() {
+                subjects.push(name.to_string());
+
+                if let Some(digest) = entry["digest"]["sha256"].as_str() {
+                    hashes.insert(name.to_string(), digest.to_string());
+                }
             }
         }
     }
 
-    Ok(hashes)
+    let verification_digest = payload_json["subject"]
+        .as_array()
+        .and_then(|subjects| {
+            subjects.iter().find_map(|subject| subject["digest"]["sha256"].as_str())
+        })
+        .map(str::to_string);
+
+    let source_dependencies = payload_json
+        .pointer("/predicate/buildDefinition/resolvedDependencies")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|dependency| {
+            Some((
+                dependency["uri"].as_str()?.to_string(),
+                dependency["digest"]["gitCommit"].as_str()?.to_string(),
+            ))
+        })
+        .collect();
+
+    Ok(AttestationPayload { hashes, subjects, verification_digest, source_dependencies })
 }
 
-async fn download_and_extract(
-    config: &Config,
+fn verify_attestation_bundle(
+    bundle_json: &str,
+    subject_digest: &str,
     repo: &str,
-    downloader: &Downloader,
-    release_url: &str,
-    version: &str,
     tag: &str,
-    target: &Target,
 ) -> Result<()> {
-    let archive_name = format!(
+    let bundle = Bundle::from_json(bundle_json).wrap_err("failed to parse Sigstore bundle")?;
+    let digest = Sha256Hash::from_hex(subject_digest)
+        .wrap_err("attestation contains an invalid SHA-256 digest")?;
+    let trusted_root = TrustedRoot::from_json(SIGSTORE_PRODUCTION_TRUSTED_ROOT)
+        .wrap_err("failed to load the Sigstore public-good trust root")?;
+    let policy = VerificationPolicy::default()
+        .require_identity(release_workflow_identity(repo, tag))
+        .require_issuer(GITHUB_ACTIONS_ISSUER);
+
+    sigstore_verify::verify(digest, &bundle, &policy, &trusted_root)
+        .wrap_err("Sigstore bundle verification failed")?;
+    say!("Sigstore bundle verified ✓");
+    Ok(())
+}
+
+fn verify_nightly_source_commit(payload: &AttestationPayload, repo: &str, tag: &str) -> Result<()> {
+    let Some(expected_commit) = tag.strip_prefix("nightly-") else {
+        return Ok(());
+    };
+    if expected_commit.len() != 40 || !expected_commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("nightly tag {tag} does not contain a full Git commit");
+    }
+
+    let expected_uri = format!("git+https://github.com/{repo}@refs/heads/master");
+    if !payload
+        .source_dependencies
+        .iter()
+        .any(|(uri, commit)| uri == &expected_uri && commit.eq_ignore_ascii_case(expected_commit))
+    {
+        bail!("attestation source commit does not match nightly tag {tag}");
+    }
+    Ok(())
+}
+
+fn release_workflow_identity(repo: &str, tag: &str) -> String {
+    let git_ref = if tag == "nightly" || tag.starts_with("nightly-") {
+        "refs/heads/master".to_string()
+    } else {
+        format!("refs/tags/{tag}")
+    };
+    format!("https://github.com/{repo}/{RELEASE_WORKFLOW}@{git_ref}")
+}
+
+fn expected_hash<'a>(
+    hashes: &'a HashMap<String, String>,
+    bin: &str,
+    bin_name: &str,
+) -> Result<Option<&'a String>> {
+    if let Some(hash) = hashes.get(bin).or_else(|| hashes.get(bin_name)) {
+        return Ok(Some(hash));
+    }
+
+    let matching_subjects = hashes
+        .iter()
+        .filter(|(subject, _)| {
+            let basename = attestation_subject_basename(subject);
+            basename == bin || basename == bin_name
+        })
+        .collect::<Vec<_>>();
+
+    match matching_subjects.as_slice() {
+        [] => Ok(None),
+        [(_, hash)] => Ok(Some(*hash)),
+        _ => {
+            bail!(
+                "attestation has ambiguous SHA-256 hash subjects for {bin}: {}",
+                format_subjects(matching_subjects.iter().map(|(subject, _)| subject.as_str()))
+            );
+        }
+    }
+}
+
+fn missing_attestation_bins(bins: &[Bin], hashes: &HashMap<String, String>) -> Result<Vec<String>> {
+    let mut missing = Vec::new();
+    for &Bin { optional, name: bin } in bins {
+        let bin_name = bin_name(bin);
+        if !optional && expected_hash(hashes, bin, &bin_name)?.is_none() {
+            missing.push(bin.to_string());
+        }
+    }
+    Ok(missing)
+}
+
+fn attestation_subject_basename(subject: &str) -> &str {
+    subject.rsplit(['/', '\\']).find(|part| !part.is_empty()).unwrap_or(subject)
+}
+
+fn format_hash_subjects(hashes: &HashMap<String, String>) -> String {
+    format_subjects(hashes.keys())
+}
+
+fn format_subjects<I, S>(subjects: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut subjects = subjects.into_iter().map(|s| s.as_ref().to_string()).collect::<Vec<_>>();
+    subjects.sort();
+    subjects.dedup();
+    if subjects.is_empty() { "none".to_string() } else { subjects.join(", ") }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum InstalledBinsStatus {
+    Verified,
+    Missing(String),
+    NonExecutable(String),
+    HashError(String),
+    HashMismatch(String),
+    Unverifiable(String),
+}
+
+fn installed_bins_status(
+    config: &Config,
+    version_dir: &Path,
+    hashes: &HashMap<String, String>,
+) -> Result<InstalledBinsStatus> {
+    for &Bin { optional, name: bin } in config.network.bins {
+        let bin_name = bin_name(bin);
+        let path = version_dir.join(&bin_name);
+        if let Some(expected_hash) = expected_hash(hashes, bin, &bin_name)? {
+            if !path.exists() {
+                return Ok(InstalledBinsStatus::Missing(bin_name));
+            }
+            if !is_executable(&path) {
+                return Ok(InstalledBinsStatus::NonExecutable(bin_name));
+            }
+            let Ok(actual_hash) = compute_sha256(&path) else {
+                return Ok(InstalledBinsStatus::HashError(bin_name));
+            };
+            if actual_hash != *expected_hash {
+                return Ok(InstalledBinsStatus::HashMismatch(bin_name));
+            }
+        } else if !optional || path.exists() {
+            return Ok(InstalledBinsStatus::Unverifiable(bin_name));
+        }
+    }
+
+    Ok(InstalledBinsStatus::Verified)
+}
+
+#[derive(Debug)]
+struct ExtractedArchive {
+    _temp_dir: tempfile::TempDir,
+    path: PathBuf,
+}
+
+fn archive_name(config: &Config, version: &str, target: &Target) -> String {
+    format!(
         "{prefix}_{version}_{platform}_{arch}.{ext}",
         prefix = config.network.archive_prefix,
         platform = target.platform.as_str(),
         arch = target.arch.as_str(),
         ext = target.platform.archive_ext()
-    );
+    )
+}
 
+async fn download_and_extract(
+    downloader: &Downloader,
+    release_url: &str,
+    archive_name: &str,
+    target: &Target,
+    expected_archive_hash: Option<&str>,
+) -> Result<ExtractedArchive> {
     let archive_url = format!("{release_url}{archive_name}");
     say!("downloading {archive_name}");
 
     let temp_dir = tempfile::tempdir()?;
-    let archive_path = temp_dir.path().join(&archive_name);
+    let archive_path = temp_dir.path().join(archive_name);
+    let extract_dir = temp_dir.path().join("extracted");
+    fs::create_dir_all(&extract_dir)?;
 
     downloader.download_to_file(&archive_url, &archive_path).await?;
 
-    let version_dir = config.version_dir(repo, tag);
-    fs::create_dir_all(&version_dir)?;
+    if let Some(expected) = expected_archive_hash {
+        let actual = compute_sha256(&archive_path)
+            .wrap_err("could not calculate SHA-256 hash for downloaded archive")?;
+        if actual != expected {
+            bail!("archive hash verification failed: expected {expected}, got {actual}");
+        }
+        say!("{archive_name} verified ✓");
+    }
 
     if target.platform == Platform::Win32 {
-        extract_zip(&archive_path, &version_dir)?;
+        extract_zip(&archive_path, &extract_dir)?;
     } else {
-        extract_tar_gz(&archive_path, &version_dir)?;
+        extract_tar_gz(&archive_path, &extract_dir)?;
     }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        for entry in fs::read_dir(&version_dir)? {
+        for entry in fs::read_dir(&extract_dir)? {
             let entry = entry?;
             let path = entry.path();
             if path.is_file() {
@@ -450,38 +786,78 @@ async fn download_and_extract(
         }
     }
 
+    Ok(ExtractedArchive { _temp_dir: temp_dir, path: extract_dir })
+}
+
+fn validate_extracted_binaries(config: &Config, dir: &Path) -> Result<()> {
+    for &Bin { optional, name: bin } in config.network.bins {
+        let path = dir.join(bin_name(bin));
+        if (!optional || path.exists()) && !is_executable(&path) {
+            bail!("binary {bin} not found at {}", path.display());
+        }
+    }
+
     Ok(())
 }
 
-fn verify_installed_binaries(
+fn replace_version_bins_from_dir(config: &Config, repo: &str, tag: &str, dir: &Path) -> Result<()> {
+    let version_dir = config.version_dir(repo, tag);
+    fs::create_dir_all(&version_dir)?;
+    clear_version_bins(config, &version_dir)?;
+
+    for &Bin { optional, name: bin } in config.network.bins {
+        let src = dir.join(bin_name(bin));
+        if src.is_file() {
+            let dest = version_dir.join(bin_name(bin));
+            remove_if_exists(&dest)?;
+            fs::copy(&src, &dest)?;
+        } else if !optional {
+            bail!("binary {bin} not found at {}", src.display());
+        }
+    }
+
+    Ok(())
+}
+
+fn clear_version_bins(config: &Config, version_dir: &Path) -> Result<()> {
+    for &Bin { name: bin, .. } in config.network.bins {
+        remove_if_exists(&version_dir.join(bin))?;
+        remove_if_exists(&version_dir.join(format!("{bin}.exe")))?;
+    }
+    Ok(())
+}
+
+fn verify_binaries(
     config: &Config,
-    repo: &str,
-    tag: &str,
+    version_dir: &Path,
     hashes: &HashMap<String, String>,
 ) -> Result<()> {
     say!("verifying downloaded binaries against the attestation file");
 
-    let version_dir = config.version_dir(repo, tag);
     let mut failed = false;
+    let mut missing = Vec::new();
 
-    for bin in config.network.bins {
+    for &Bin { optional, name: bin } in config.network.bins {
         let bin_name = bin_name(bin);
-        let expected = hashes.get(*bin).or_else(|| hashes.get(&bin_name));
+        let expected = expected_hash(hashes, bin, &bin_name)?;
         let path = version_dir.join(&bin_name);
 
         match expected {
-            None => {
-                say!("no expected hash for {bin}");
+            None if !optional || path.exists() => {
+                missing.push(bin_name);
+                failed = true;
+            }
+            None => {}
+            Some(_) if !is_executable(&path) => {
+                say!("binary {bin} not found at {}", path.display());
                 failed = true;
             }
             Some(expected_hash) => {
-                if !is_executable(&path) {
-                    say!("binary {bin} not found at {}", path.display());
-                    failed = true;
-                    continue;
-                }
-
-                let actual = compute_sha256(&path)?;
+                let actual = compute_sha256(&path).wrap_err_with(|| {
+                    format!(
+                        "could not calculate SHA-256 hash for downloaded {bin}, aborting installation"
+                    )
+                })?;
                 if actual != *expected_hash {
                     say!("{bin} hash verification failed:");
                     say!("  expected: {expected_hash}");
@@ -492,6 +868,11 @@ fn verify_installed_binaries(
                 }
             }
         }
+    }
+
+    if !missing.is_empty() {
+        say!("attestation did not include expected hashes for: {}", missing.join(", "));
+        say!("attestation subjects: {}", format_hash_subjects(hashes));
     }
 
     if failed {
@@ -533,8 +914,6 @@ async fn download_manpages(
 }
 
 pub(crate) fn list(config: &Config) -> Result<()> {
-    let bins = config.network.bins;
-
     if config.versions_dir.exists() {
         for owner_entry in fs::read_dir(&config.versions_dir)? {
             let owner_entry = owner_entry?;
@@ -568,9 +947,12 @@ pub(crate) fn list(config: &Config) -> Result<()> {
 
                     tell!("{owner_name}/{repo_name} {version_name}");
 
-                    // A missing or non-runnable binary is a broken install.
-                    for bin in bins {
+                    for &Bin { optional, name: bin } in config.network.bins {
                         let bin_path = version_path.join(bin_name(bin));
+                        if optional && !bin_path.exists() {
+                            continue;
+                        }
+
                         let v = get_bin_version(&bin_path).wrap_err_with(|| {
                             format!(
                                 "{owner_name}/{repo_name} {version_name} is broken: \
@@ -585,7 +967,7 @@ pub(crate) fn list(config: &Config) -> Result<()> {
             }
         }
     } else {
-        for bin in bins {
+        for &Bin { name: bin, .. } in config.network.bins {
             let bin_path = config.bin_path(bin);
             if bin_path.exists() {
                 match get_bin_version(&bin_path) {
@@ -610,10 +992,15 @@ pub(crate) async fn use_version_resolved(
     repo: &str,
     version: &str,
     repo_explicit: bool,
+    platform: Option<&str>,
+    arch: Option<&str>,
 ) -> Result<()> {
     let tag = if is_resolvable_use_version(version) {
         let downloader = Downloader::new()?;
-        let (_version, tag) = resolve_version_and_tag(&downloader, repo, version).await?;
+        let target = Target::detect(platform, arch)?;
+        let nightly_archive = archive_name(config, "nightly", &target);
+        let (_version, tag) =
+            resolve_version_and_tag(&downloader, repo, version, &nightly_archive).await?;
         tag
     } else {
         version.to_string()
@@ -623,10 +1010,8 @@ pub(crate) async fn use_version_resolved(
         return use_version(config, repo, &tag);
     }
 
-    if !repo_explicit {
-        if let Some(found_repo) = find_unique_repo_for_version(config, &tag)? {
-            return use_version(config, &found_repo, &tag);
-        }
+    if !repo_explicit && let Some(found_repo) = find_unique_repo_for_version(config, &tag)? {
+        return use_version(config, &found_repo, &tag);
     }
 
     use_version(config, repo, &tag)
@@ -669,7 +1054,7 @@ fn find_unique_repo_for_version(config: &Config, version: &str) -> Result<Option
             bail!(
                 "version {version} is installed for multiple repos ({}); specify --repo to disambiguate",
                 matches.join(", ")
-            )
+            );
         }
     }
 }
@@ -700,51 +1085,75 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
     }
 
     crate::process::check_bins_in_use(config)?;
-    fs::create_dir_all(&config.bin_dir)?;
 
-    for bin in config.network.bins {
-        let bin_name = bin_name(bin);
-        let src = version_dir.join(&bin_name);
-        let dest = config.bin_path(bin);
-
-        if !src.is_file() {
+    // Preflight all bins before mutating: prove each one exists and runs the same
+    // semantic check activation relies on, so neither a missing nor a broken
+    // binary can leave a mix of old and new binaries active.
+    for &Bin { optional, name: bin } in config.network.bins {
+        let src = version_dir.join(bin_name(bin));
+        if src.is_file() {
+            get_bin_version(&src)
+                .wrap_err_with(|| format!("failed to run {bin} in version {version}"))?;
+        } else if !optional {
             bail!("binary {bin} not found in version {version} at {}", src.display());
         }
+    }
 
-        let old_version = if dest.exists() { get_bin_version(&dest).ok() } else { None };
+    fs::create_dir_all(&config.bin_dir)?;
 
-        remove_if_exists(&dest)?;
-
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&src, &dest)?;
-        #[cfg(not(unix))]
-        fs::copy(&src, &dest)?;
-
-        let v = get_bin_version(&dest)
-            .wrap_err_with(|| format!("failed to run {bin} after activating version {version}"))?;
-        match old_version {
-            Some(old) if old != v => say!("use - {v} (from {old})"),
-            _ => say!("use - {v}"),
+    for &Bin { optional, name: bin } in config.network.bins {
+        let bin_name = bin_name(bin);
+        let src = version_dir.join(&bin_name);
+        if src.is_file() {
+            activate_bin(config, version, bin, &src)?;
+        } else if optional {
+            clear_active_bin(config, bin)?;
+        } else {
+            bail!("binary {bin} not found in version {version} at {}", src.display());
         }
+    }
 
-        if let Ok(which_path) = which::which(bin) {
-            if which_path != dest {
-                warn!("");
-                eprintln!(
-                    r#"There are multiple binaries with the name '{bin}' present in your 'PATH'.
+    Ok(())
+}
+
+fn activate_bin(config: &Config, version: &str, bin: &str, src: &Path) -> Result<()> {
+    let dest = config.bin_path(bin);
+    let old_version = if dest.exists() { get_bin_version(&dest).ok() } else { None };
+
+    clear_active_bin(config, bin)?;
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(src, &dest)?;
+    #[cfg(not(unix))]
+    fs::copy(src, &dest)?;
+
+    let v = get_bin_version(&dest)
+        .wrap_err_with(|| format!("failed to run {bin} after activating version {version}"))?;
+    match old_version {
+        Some(old) if old != v => say!("use - {v} (from {old})"),
+        _ => say!("use - {v}"),
+    }
+
+    warn_if_shadowed(config, bin, &dest);
+    Ok(())
+}
+
+fn warn_if_shadowed(config: &Config, bin: &str, dest: &Path) {
+    if let Ok(which_path) = which::which(bin)
+        && which_path != dest
+    {
+        warn!("");
+        eprintln!(
+            r#"There are multiple binaries with the name '{bin}' present in your 'PATH'.
 This may be the result of installing '{bin}' using another method,
 like Cargo or other package managers.
 You may need to run 'rm {which_path}' or move '{bin_dir}'
 in your 'PATH' to allow the newly installed version to take precedence!
 "#,
-                    which_path = which_path.display(),
-                    bin_dir = config.bin_dir.display()
-                );
-            }
-        }
+            which_path = which_path.display(),
+            bin_dir = config.bin_dir.display()
+        );
     }
-
-    Ok(())
 }
 
 /// Resolves a requested version string to its `(version, tag)` pair, where `tag`
@@ -759,6 +1168,7 @@ pub(crate) async fn resolve_version_and_tag(
     downloader: &Downloader,
     repo: &str,
     version: &str,
+    nightly_archive: &str,
 ) -> Result<(String, String)> {
     if version == "latest" || version == "stable" {
         say!("fetching latest release tag from {repo}...");
@@ -767,7 +1177,7 @@ pub(crate) async fn resolve_version_and_tag(
         Ok((tag.clone(), tag))
     } else if version == "nightly" {
         say!("fetching latest nightly release tags from {repo}...");
-        let tag = fetch_latest_nightly_release_tag(downloader, repo).await?;
+        let tag = fetch_latest_nightly_release_tag(downloader, repo, nightly_archive).await?;
         say!("resolved nightly release tag: {tag}");
         Ok(("nightly".to_string(), tag))
     } else {
@@ -793,7 +1203,9 @@ async fn fetch_latest_release_tag(downloader: &Downloader, repo: &str) -> Result
     let tag = json["tag_name"].as_str().filter(|s| !s.is_empty());
     match tag {
         Some(tag) => Ok(tag.to_string()),
-        None => bail!("could not find a latest release tag for {repo}"),
+        None => {
+            bail!("could not find a latest release tag for {repo}");
+        }
     }
 }
 
@@ -824,14 +1236,184 @@ pub(crate) fn tag_from_release_url(url: &str) -> Option<String> {
     valid.then(|| tag.to_string())
 }
 
-/// Fetches the newest nightly release tag for `repo` via the GitHub API.
-async fn fetch_latest_nightly_release_tag(downloader: &Downloader, repo: &str) -> Result<String> {
+/// Fetches the newest nightly release tag for `repo`.
+///
+/// Prefers GitHub's public releases Atom feed, which is not subject to the
+/// unauthenticated REST API rate limit. The requested archive is checked for
+/// availability because GitHub can expose draft releases in the feed before
+/// their assets can be downloaded. Falls back to the API when the feed cannot
+/// be fetched, parsed, or does not contain an available nightly.
+async fn fetch_latest_nightly_release_tag(
+    downloader: &Downloader,
+    repo: &str,
+    archive_name: &str,
+) -> Result<String> {
+    if let Some(tag) =
+        fetch_latest_nightly_release_tag_via_feed(downloader, repo, archive_name).await?
+    {
+        return Ok(tag);
+    }
+
     let url = format!("https://api.github.com/repos/{repo}/releases");
     let body = downloader
         .download_to_string(&url)
         .await
         .wrap_err("failed to fetch release tags from GitHub API")?;
     latest_nightly_release_tag(&body, repo)
+}
+
+async fn fetch_latest_nightly_release_tag_via_feed(
+    downloader: &Downloader,
+    repo: &str,
+    archive_name: &str,
+) -> Result<Option<String>> {
+    let url = format!("https://github.com/{repo}/releases.atom");
+    let Ok(body) = downloader.download_to_string(&url).await else { return Ok(None) };
+    let Some(candidates) = nightly_release_tags_from_feed(&body, repo) else { return Ok(None) };
+
+    select_available_nightly_release_tag(candidates, |tag| {
+        let url = format!("https://github.com/{repo}/releases/download/{tag}/{archive_name}");
+        async move { downloader.is_url_available(&url).await }
+    })
+    .await
+}
+
+async fn select_available_nightly_release_tag<F, Fut>(
+    candidates: Vec<String>,
+    mut is_available: F,
+) -> Result<Option<String>>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<bool>>,
+{
+    for tag in candidates {
+        if is_available(tag.clone()).await? {
+            return Ok(Some(tag));
+        }
+    }
+    Ok(None)
+}
+
+fn nightly_release_tags_from_feed(feed: &str, repo: &str) -> Option<Vec<String>> {
+    let mut reader = Reader::from_str(feed);
+    reader.config_mut().trim_text(true);
+
+    let mut in_feed = false;
+    let mut feed_closed = false;
+    let mut in_entry = false;
+    let mut updated = None;
+    let mut tag = None;
+    let mut candidates = Vec::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(event)) if !in_feed => {
+                if feed_closed || event.name() != QName(b"feed") {
+                    return None;
+                }
+                in_feed = true;
+            }
+            Ok(Event::Empty(_)) if !in_feed => return None,
+            Ok(Event::Start(event)) if event.name() == QName(b"feed") => return None,
+            Ok(Event::Start(event)) if in_feed && event.name() == QName(b"entry") => {
+                in_entry = true;
+                updated = None;
+                tag = None;
+            }
+            Ok(Event::Start(event)) if in_entry && event.name() == QName(b"updated") => {
+                updated = reader
+                    .read_text(QName(b"updated"))
+                    .ok()
+                    .and_then(|value| value.decode().ok())
+                    .and_then(|value| OffsetDateTime::parse(&value, &Rfc3339).ok());
+            }
+            Ok(Event::Empty(event)) | Ok(Event::Start(event))
+                if in_entry && event.name() == QName(b"link") =>
+            {
+                let mut is_alternate = false;
+                let mut href = None;
+                for attribute in event.attributes() {
+                    let attribute = attribute.ok()?;
+                    if attribute.key == QName(b"rel") {
+                        is_alternate = attribute
+                            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                            .ok()
+                            .is_some_and(|value| value == "alternate");
+                    } else if attribute.key == QName(b"href") {
+                        href = attribute
+                            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                            .ok()
+                            .map(|value| value.into_owned());
+                    }
+                }
+                if is_alternate
+                    && let Some(candidate) =
+                        href.and_then(|href| nightly_tag_from_release_url(&href, repo))
+                {
+                    tag = Some(candidate);
+                }
+            }
+            Ok(Event::End(event)) if event.name() == QName(b"entry") => {
+                if let (Some(updated), Some(tag)) = (updated.take(), tag.take()) {
+                    candidates.push((updated, tag));
+                }
+                in_entry = false;
+            }
+            Ok(Event::End(event)) if event.name() == QName(b"feed") => {
+                in_feed = false;
+                feed_closed = true;
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => return None,
+            _ => {}
+        }
+    }
+
+    if !feed_closed {
+        return None;
+    }
+    candidates.sort_unstable_by_key(|(updated, _)| std::cmp::Reverse(*updated));
+    (!candidates.is_empty()).then(|| candidates.into_iter().map(|(_, tag)| tag).collect())
+}
+
+#[cfg(test)]
+fn latest_nightly_release_tag_from_feed(feed: &str, repo: &str) -> Option<String> {
+    nightly_release_tags_from_feed(feed, repo)?.into_iter().next()
+}
+
+fn nightly_tag_from_release_url(url: &str, repo: &str) -> Option<String> {
+    let url = reqwest::Url::parse(url).ok()?;
+    if url.scheme() != "https"
+        || !url.host_str().is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
+        || url.port_or_known_default() != Some(443)
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+
+    let (expected_owner, expected_repo) = repo.split_once('/')?;
+    if expected_owner.is_empty() || expected_repo.is_empty() || expected_repo.contains('/') {
+        return None;
+    }
+    let mut segments = url.path_segments()?;
+    let owner = segments.next()?;
+    let repo = segments.next()?;
+    if !owner.eq_ignore_ascii_case(expected_owner)
+        || !repo.eq_ignore_ascii_case(expected_repo)
+        || segments.next()? != "releases"
+        || segments.next()? != "tag"
+    {
+        return None;
+    }
+    let tag = segments.next()?;
+    if segments.next().is_some() {
+        return None;
+    }
+    let sha = tag.strip_prefix("nightly-")?;
+    (sha.len() == 40
+        && sha.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then(|| tag.to_string())
 }
 
 fn latest_nightly_release_tag(json: &str, repo: &str) -> Result<String> {
@@ -873,6 +1455,16 @@ fn need_cmd(cmd: &str) -> Result<()> {
     which::which(cmd).map(|_| ()).map_err(|_| eyre::eyre!("need '{cmd}' (command not found)"))
 }
 
+/// Removes any previously activated `bin` from the bin dir, clearing both the
+/// bare and `.exe` names. On Windows the active name is `<bin>.exe`, so clearing
+/// only that leaves a stale bare `<bin>` (e.g. from the legacy bash foundryup)
+/// that could shadow the new one; on Unix the `.exe` removal is a no-op.
+fn clear_active_bin(config: &Config, bin: &str) -> Result<()> {
+    remove_if_exists(&config.bin_dir.join(bin))?;
+    remove_if_exists(&config.bin_dir.join(format!("{bin}.exe")))?;
+    Ok(())
+}
+
 /// Removes `path` if it exists, including dangling symlinks.
 ///
 /// Uses `symlink_metadata` so a broken symlink is still detected and removed;
@@ -907,7 +1499,12 @@ fn is_executable(path: &Path) -> bool {
 fn get_bin_version(path: &Path) -> Result<String> {
     let output = std::process::Command::new(path).arg("-V").output()?;
     if !output.status.success() {
-        bail!("`{} -V` exited with {}", path.display(), output.status);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            bail!("`{} -V` exited with {}", path.display(), output.status);
+        }
+        bail!("`{} -V` exited with {}:\n{stderr}", path.display(), output.status);
     }
     let version = String::from_utf8_lossy(&output.stdout);
     Ok(version.trim().to_string())
@@ -924,6 +1521,180 @@ fn rustflags() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
+    use snapbox::{assert_data_eq, str};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn latest_nightly_release_tag_from_github_feed_fixture() {
+        let feed = include_str!("../tests/fixtures/github-releases.atom");
+
+        assert_eq!(
+            latest_nightly_release_tag_from_feed(feed, "foundry-rs/foundry"),
+            Some("nightly-3333333333333333333333333333333333333333".to_string())
+        );
+    }
+
+    #[test]
+    fn latest_nightly_release_tag_from_feed_selects_newest_updated_entry() {
+        let old = "nightly-1111111111111111111111111111111111111111";
+        let new = "nightly-2222222222222222222222222222222222222222";
+        let middle = "nightly-3333333333333333333333333333333333333333";
+        let feed = format!(
+            r#"<feed>
+                <entry>
+                    <updated>2026-05-01T00:00:00Z</updated>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/{old}"/>
+                </entry>
+                <entry>
+                    <updated>2026-05-03T00:00:00Z</updated>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/{new}"/>
+                </entry>
+                <entry>
+                    <updated>2026-05-02T00:00:00Z</updated>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/{middle}"/>
+                </entry>
+            </feed>"#
+        );
+
+        assert_eq!(
+            latest_nightly_release_tag_from_feed(&feed, "foundry-rs/foundry"),
+            Some(new.to_string())
+        );
+    }
+
+    #[test]
+    fn latest_nightly_release_tag_from_feed_only_uses_entry_release_links() {
+        let stable_mention = "nightly-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let nightly = "nightly-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let feed = format!(
+            r#"<feed>
+                <entry>
+                    <updated>2026-05-03T00:00:00Z</updated>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/v1.0.0"/>
+                    <content>Compare {stable_mention} with another release.</content>
+                </entry>
+                <entry>
+                    <updated>2026-05-02T00:00:00Z</updated>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/{nightly}"/>
+                </entry>
+            </feed>"#
+        );
+
+        assert_eq!(
+            latest_nightly_release_tag_from_feed(&feed, "foundry-rs/foundry"),
+            Some(nightly.to_string())
+        );
+    }
+
+    #[test]
+    fn latest_nightly_release_tag_from_feed_rejects_invalid_entries() {
+        let invalid_feeds = [
+            r#"<feed><entry><updated>2026-05-01T00:00:00Z</updated><link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/nightly-short"/></entry></feed>"#,
+            r#"<feed><entry><updated>2026-05-01T00:00:00Z</updated><link rel="alternate" href="https://example.com/foundry-rs/foundry/releases/tag/nightly-1111111111111111111111111111111111111111"/></entry></feed>"#,
+            r#"<feed><entry><link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/nightly-1111111111111111111111111111111111111111"/></entry></feed>"#,
+            r#"<feed><entry><updated>2026-05-01T00:00:00Z</updated>"#,
+            r#"<feed><entry><updated>2026-05-01T00:00:00Z</updated><link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/nightly-1111111111111111111111111111111111111111"/></entry>"#,
+            r#"<entry><updated>2026-05-01T00:00:00Z</updated><link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/nightly-1111111111111111111111111111111111111111"/></entry>"#,
+        ];
+
+        for feed in invalid_feeds {
+            assert_eq!(latest_nightly_release_tag_from_feed(feed, "foundry-rs/foundry"), None);
+        }
+    }
+
+    #[test]
+    fn latest_nightly_release_tag_from_feed_ignores_invalid_updated_values() {
+        let valid = "nightly-1111111111111111111111111111111111111111";
+        let invalid = "nightly-2222222222222222222222222222222222222222";
+        let feed = format!(
+            r#"<feed>
+                <entry>
+                    <updated>2026-05-01T00:00:00Z</updated>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/{valid}"/>
+                </entry>
+                <entry>
+                    <updated>not-a-timestamp</updated>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/{invalid}"/>
+                </entry>
+            </feed>"#
+        );
+
+        assert_eq!(
+            latest_nightly_release_tag_from_feed(&feed, "foundry-rs/foundry"),
+            Some(valid.to_string())
+        );
+    }
+
+    #[test]
+    fn latest_nightly_release_tag_from_feed_supports_rfc3339_timestamps() {
+        let older = "nightly-1111111111111111111111111111111111111111";
+        let newer = "nightly-2222222222222222222222222222222222222222";
+        let feed = format!(
+            r#"<feed>
+                <entry>
+                    <updated>2026-05-03T01:00:00+02:00</updated>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/{older}"/>
+                </entry>
+                <entry>
+                    <updated>2026-05-03T00:30:00.500Z</updated>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/{newer}"/>
+                </entry>
+            </feed>"#
+        );
+
+        assert_eq!(
+            latest_nightly_release_tag_from_feed(&feed, "foundry-rs/foundry"),
+            Some(newer.to_string())
+        );
+    }
+
+    #[test]
+    fn latest_nightly_release_tag_from_feed_matches_repo_case_insensitively() {
+        let feed = include_str!("../tests/fixtures/github-releases.atom");
+
+        assert_eq!(
+            latest_nightly_release_tag_from_feed(feed, "FOUNDRY-RS/FOUNDRY"),
+            Some("nightly-3333333333333333333333333333333333333333".to_string())
+        );
+    }
+
+    #[test]
+    fn latest_nightly_release_tag_from_feed_keeps_valid_alternate_link() {
+        let nightly = "nightly-1111111111111111111111111111111111111111";
+        let feed = format!(
+            r#"<feed>
+                <entry>
+                    <updated>2026-05-01T00:00:00Z</updated>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases/tag/{nightly}"/>
+                    <link rel="alternate" href="https://github.com/foundry-rs/foundry/releases"/>
+                </entry>
+            </feed>"#
+        );
+
+        assert_eq!(
+            latest_nightly_release_tag_from_feed(&feed, "foundry-rs/foundry"),
+            Some(nightly.to_string())
+        );
+    }
+
+    #[test]
+    fn available_nightly_release_skips_unpublished_candidate() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let newest = "nightly-new".to_string();
+            let previous = "nightly-previous".to_string();
+
+            let selected =
+                select_available_nightly_release_tag(vec![newest, previous.clone()], |tag| {
+                    std::future::ready(Ok(tag == "nightly-previous"))
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(selected, Some(previous));
+        });
+    }
 
     #[test]
     fn latest_nightly_release_tag_selects_newest_published_at() {
@@ -960,7 +1731,10 @@ mod tests {
 
         let err = latest_nightly_release_tag(json, "foundry-rs/foundry").unwrap_err();
 
-        assert!(err.to_string().contains("could not find a nightly release tag"));
+        assert_data_eq!(
+            err.to_string(),
+            str!["could not find a nightly release tag for foundry-rs/foundry"]
+        );
     }
 
     #[test]
@@ -1120,7 +1894,464 @@ mod tests {
           }
         }"#;
 
-        let hashes = parse_attestation_payload(s).unwrap();
-        assert!(!hashes.is_empty());
+        let attestation = parse_attestation_payload(s).unwrap();
+        assert!(!attestation.hashes.is_empty());
+        assert!(attestation.hashes.contains_key("forge"));
+
+        let digest = attestation.verification_digest.as_deref().unwrap();
+        verify_attestation_bundle(s, digest, "foundry-rs/foundry", "stable").unwrap();
+
+        let err = verify_attestation_bundle(s, digest, "attacker/foundry", "stable").unwrap_err();
+        assert!(err.to_string().contains("Sigstore bundle verification failed"));
+
+        let mut tampered: serde_json::Value = serde_json::from_str(s).unwrap();
+        tampered["dsseEnvelope"]["signatures"][0]["sig"] = "AAAA".into();
+        let err = verify_attestation_bundle(
+            &tampered.to_string(),
+            digest,
+            "foundry-rs/foundry",
+            "stable",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Sigstore bundle verification failed"));
+    }
+
+    #[test]
+    fn attestation_parses_subjects_without_sha256_hashes() {
+        let s = attestation_json(serde_json::json!([
+            {
+                "name": "forge",
+                "digest": {
+                    "sha512": "abc"
+                }
+            }
+        ]));
+
+        let attestation = parse_attestation_payload(&s).unwrap();
+        assert_data_eq!(format_subjects(&attestation.subjects), str!["forge"]);
+        assert!(attestation.hashes.is_empty());
+        let bins = [Bin { optional: false, name: "forge" }];
+        assert_eq!(missing_attestation_bins(&bins, &attestation.hashes).unwrap(), ["forge"]);
+    }
+
+    #[test]
+    fn attestation_bin_lookup_accepts_path_subjects() {
+        let hashes = HashMap::from([(
+            "target/x86_64-unknown-linux-gnu/release/forge".to_string(),
+            "abc".to_string(),
+        )]);
+
+        assert_eq!(expected_hash(&hashes, "forge", "forge").unwrap().unwrap(), "abc");
+        let bins = [Bin { optional: false, name: "forge" }];
+        assert!(missing_attestation_bins(&bins, &hashes).unwrap().is_empty());
+    }
+
+    #[test]
+    fn attestation_bin_lookup_rejects_ambiguous_path_subjects() {
+        let hashes = HashMap::from([
+            ("darwin/forge".to_string(), "abc".to_string()),
+            ("linux/forge".to_string(), "def".to_string()),
+        ]);
+
+        let err = expected_hash(&hashes, "forge", "forge").unwrap_err();
+        assert_data_eq!(
+            err.to_string(),
+            str![
+                "attestation has ambiguous SHA-256 hash subjects for forge: darwin/forge, linux/forge"
+            ]
+        );
+    }
+
+    #[test]
+    fn attestation_missing_bins_lists_required_binary_names() {
+        let hashes =
+            HashMap::from([("foundry_v1.7.1_linux_amd64.tar.gz".to_string(), "abc".to_string())]);
+        let bins = [
+            Bin { optional: false, name: "forge" },
+            Bin { optional: false, name: "cast" },
+            Bin { optional: true, name: "solar" },
+        ];
+
+        let missing = missing_attestation_bins(&bins, &hashes).unwrap();
+
+        assert_eq!(missing, ["forge", "cast"]);
+        assert_eq!(format_hash_subjects(&hashes), "foundry_v1.7.1_linux_amd64.tar.gz");
+    }
+
+    fn attestation_json(subjects: serde_json::Value) -> String {
+        attestation_json_with_predicate(subjects, serde_json::json!({}))
+    }
+
+    #[test]
+    fn attestation_validation_retries_only_missing_hashes() {
+        let bins = [Bin { name: "forge", optional: false }];
+        let validate =
+            |json: &str| validate_attestation(json, &bins, "foundry-rs/foundry", "v1.8.1");
+        let incomplete = attestation_json(serde_json::json!([]));
+        assert!(validate(&incomplete).unwrap_err().is::<RetryableValidationError>());
+
+        let malformed = validate("not JSON").unwrap_err();
+        assert!(!malformed.is::<RetryableValidationError>());
+        let unsigned = attestation_json(serde_json::json!([
+            { "name": "forge", "digest": { "sha256": "00".repeat(32) } }
+        ]));
+        let invalid = validate(&unsigned).unwrap_err();
+        assert!(!invalid.is::<RetryableValidationError>());
+        assert!(format!("{invalid:#}").contains("Sigstore"));
+    }
+
+    fn attestation_json_with_predicate(
+        subjects: serde_json::Value,
+        predicate: serde_json::Value,
+    ) -> String {
+        let payload = serde_json::json!({
+            "_type": "https://in-toto.io/Statement/v1",
+            "subject": subjects,
+            "predicateType": "https://slsa.dev/provenance/v1",
+            "predicate": predicate
+        })
+        .to_string();
+        let payload = base64::engine::general_purpose::STANDARD.encode(payload);
+        serde_json::json!({ "dsseEnvelope": { "payload": payload } }).to_string()
+    }
+
+    #[test]
+    fn attestations_are_required_from_first_attested_release() {
+        assert!(!attestation_required("v1.2.3"));
+        assert!(!attestation_required("v1.3.0-alpha"));
+        assert!(attestation_required("v1.3.0-rc1"));
+        assert!(attestation_required("v1.3.0"));
+        assert!(attestation_required("v1.8.1"));
+        assert!(attestation_required("nightly"));
+        assert!(attestation_required("nightly-deadbeef"));
+        assert!(attestation_required("v1.8.1.not-semver"));
+        assert!(attestation_required("feature-branch"));
+    }
+
+    #[test]
+    fn attestation_identity_is_pinned_to_release_workflow_and_tag() {
+        assert_eq!(
+            release_workflow_identity("foundry-rs/foundry", "v1.8.1"),
+            "https://github.com/foundry-rs/foundry/.github/workflows/release.yml@refs/tags/v1.8.1"
+        );
+        assert_eq!(
+            release_workflow_identity("foundry-rs/foundry", "nightly-deadbeef"),
+            "https://github.com/foundry-rs/foundry/.github/workflows/release.yml@refs/heads/master"
+        );
+    }
+
+    #[test]
+    fn attestation_rejects_non_slsa_predicate() {
+        let payload = serde_json::json!({
+            "_type": "https://in-toto.io/Statement/v1",
+            "subject": [{ "name": "forge", "digest": { "sha256": "abc" } }],
+            "predicateType": "https://example.com/not-slsa",
+            "predicate": {}
+        })
+        .to_string();
+        let payload = base64::engine::general_purpose::STANDARD.encode(payload);
+        let bundle = serde_json::json!({ "dsseEnvelope": { "payload": payload } }).to_string();
+
+        let err = parse_attestation_payload(&bundle).unwrap_err();
+        assert_eq!(err.to_string(), "attestation payload is not SLSA provenance v1");
+    }
+
+    #[test]
+    fn nightly_attestation_is_bound_to_tag_commit() {
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let bundle = attestation_json_with_predicate(
+            serde_json::json!([{
+                "name": "forge",
+                "digest": { "sha256": "abc" }
+            }]),
+            serde_json::json!({
+                "buildDefinition": {
+                    "resolvedDependencies": [{
+                        "uri": "git+https://github.com/foundry-rs/foundry@refs/heads/master",
+                        "digest": { "gitCommit": commit }
+                    }]
+                }
+            }),
+        );
+
+        let payload = parse_attestation_payload(&bundle).unwrap();
+        verify_nightly_source_commit(&payload, "foundry-rs/foundry", &format!("nightly-{commit}"))
+            .unwrap();
+
+        let err = verify_nightly_source_commit(
+            &payload,
+            "foundry-rs/foundry",
+            "nightly-ffffffffffffffffffffffffffffffffffffffff",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("does not match nightly tag"));
+    }
+
+    #[test]
+    fn missing_required_attestation_fails_closed() {
+        let err = missing_attestation("v1.3.0-rc1").unwrap_err();
+        assert!(err.to_string().contains("refusing to download unverified binaries"));
+
+        assert!(matches!(missing_attestation("v1.2.3").unwrap(), PrebuiltCheck::Download(None)));
+    }
+
+    fn test_config(foundry_dir: &Path) -> Config {
+        Config {
+            foundry_dir: foundry_dir.to_path_buf(),
+            versions_dir: foundry_dir.join("versions"),
+            bin_dir: foundry_dir.join("bin"),
+            man_dir: foundry_dir.join("share/man/man1"),
+            network: crate::config::NetworkConfig::FOUNDRY,
+        }
+    }
+
+    fn write_executable(path: &Path, contents: &[u8]) {
+        fs::write(path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).unwrap();
+        }
+    }
+
+    fn write_hashed_bin(version_dir: &Path, hashes: &mut HashMap<String, String>, bin: &str) {
+        let path = version_dir.join(bin_name(bin));
+        write_executable(&path, bin.as_bytes());
+        hashes.insert(bin.to_string(), compute_sha256(&path).unwrap());
+    }
+
+    fn write_required_hashed_bins(version_dir: &Path, config: &Config) -> HashMap<String, String> {
+        let mut hashes = HashMap::new();
+        for &Bin { optional, name: bin } in config.network.bins {
+            if !optional {
+                write_hashed_bin(version_dir, &mut hashes, bin);
+            }
+        }
+        hashes
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_binary_version_includes_stderr() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("forge");
+        write_executable(
+            &bin,
+            b"#!/bin/sh\nprintf '%s\\n' 'dyld: Library not loaded: libusb-1.0.0.dylib' >&2\nexit 1\n",
+        );
+
+        let err = get_bin_version(&bin).unwrap_err().to_string();
+        assert!(err.contains("exited with exit status: 1"));
+        assert!(err.contains("dyld: Library not loaded: libusb-1.0.0.dylib"));
+    }
+
+    #[test]
+    fn cargo_build_dir_uses_profile_target_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(cargo_build_dir(tmp.path(), "dev"), tmp.path().join("target/debug"));
+        assert_eq!(cargo_build_dir(tmp.path(), "release"), tmp.path().join("target/release"));
+    }
+
+    #[test]
+    fn clearing_built_bins_removes_stale_target_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let build_dir = tmp.path().join("build");
+        fs::create_dir_all(&build_dir).unwrap();
+
+        for &Bin { name: bin, .. } in config.network.bins {
+            write_executable(&build_dir.join(bin_name(bin)), bin.as_bytes());
+        }
+
+        clear_built_bins(&config, &build_dir).unwrap();
+
+        for &Bin { name: bin, .. } in config.network.bins {
+            let path = build_dir.join(bin_name(bin));
+            assert!(!path.exists(), "{} should be removed", path.display());
+        }
+    }
+
+    #[test]
+    fn replacing_version_bins_from_dir_clears_stale_optional_bin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let extracted_dir = tmp.path().join("extracted");
+        let version_dir = config.version_dir(config.network.repo, "v1.0.0");
+        fs::create_dir_all(&extracted_dir).unwrap();
+        fs::create_dir_all(&version_dir).unwrap();
+
+        for &Bin { optional, name: bin } in config.network.bins {
+            if !optional {
+                write_executable(&extracted_dir.join(bin_name(bin)), bin.as_bytes());
+            }
+        }
+        write_executable(&version_dir.join("solar"), b"stale solar");
+        write_executable(&version_dir.join("solar.exe"), b"stale solar exe");
+
+        validate_extracted_binaries(&config, &extracted_dir).unwrap();
+        replace_version_bins_from_dir(&config, config.network.repo, "v1.0.0", &extracted_dir)
+            .unwrap();
+
+        for &Bin { optional, name: bin } in config.network.bins {
+            let path = version_dir.join(bin_name(bin));
+            assert_eq!(path.exists(), !optional, "{} existence mismatch", path.display());
+            assert_eq!(
+                extracted_dir.join(bin_name(bin)).exists(),
+                !optional,
+                "{} should remain in the extracted directory",
+                bin
+            );
+        }
+        assert!(!version_dir.join("solar").exists(), "stale bare solar should be removed");
+        assert!(!version_dir.join("solar.exe").exists(), "stale solar.exe should be removed");
+    }
+
+    #[test]
+    fn verification_allows_missing_optional_bin_without_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let version_dir = config.version_dir(config.network.repo, "v1.0.0");
+        fs::create_dir_all(&version_dir).unwrap();
+        let hashes = write_required_hashed_bins(&version_dir, &config);
+
+        assert_eq!(
+            installed_bins_status(&config, &version_dir, &hashes).unwrap(),
+            InstalledBinsStatus::Verified
+        );
+        verify_binaries(&config, &version_dir, &hashes).unwrap();
+    }
+
+    #[test]
+    fn verification_requires_expected_optional_bin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let version_dir = config.version_dir(config.network.repo, "v1.0.0");
+        fs::create_dir_all(&version_dir).unwrap();
+        let mut hashes = write_required_hashed_bins(&version_dir, &config);
+        hashes.insert("solar".to_string(), "0".repeat(64));
+
+        assert_eq!(
+            installed_bins_status(&config, &version_dir, &hashes).unwrap(),
+            InstalledBinsStatus::Missing(bin_name("solar"))
+        );
+        let err = verify_binaries(&config, &version_dir, &hashes).unwrap_err();
+        assert!(err.to_string().contains("one or more binaries failed"));
+    }
+
+    #[test]
+    fn verification_reports_hash_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let version_dir = config.version_dir(config.network.repo, "v1.0.0");
+        fs::create_dir_all(&version_dir).unwrap();
+        let hashes = write_required_hashed_bins(&version_dir, &config);
+        write_executable(&version_dir.join(bin_name("forge")), b"changed");
+
+        assert_eq!(
+            installed_bins_status(&config, &version_dir, &hashes).unwrap(),
+            InstalledBinsStatus::HashMismatch(bin_name("forge"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verification_reports_non_executable_bin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let version_dir = config.version_dir(config.network.repo, "v1.0.0");
+        fs::create_dir_all(&version_dir).unwrap();
+        let hashes = write_required_hashed_bins(&version_dir, &config);
+        let forge = version_dir.join(bin_name("forge"));
+        fs::set_permissions(&forge, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert_eq!(
+            installed_bins_status(&config, &version_dir, &hashes).unwrap(),
+            InstalledBinsStatus::NonExecutable(bin_name("forge"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verification_reports_hash_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let version_dir = config.version_dir(config.network.repo, "v1.0.0");
+        fs::create_dir_all(&version_dir).unwrap();
+        let hashes = write_required_hashed_bins(&version_dir, &config);
+        let forge = version_dir.join(bin_name("forge"));
+        fs::set_permissions(&forge, std::fs::Permissions::from_mode(0o111)).unwrap();
+
+        assert_eq!(
+            installed_bins_status(&config, &version_dir, &hashes).unwrap(),
+            InstalledBinsStatus::HashError(bin_name("forge"))
+        );
+        let err = verify_binaries(&config, &version_dir, &hashes).unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "could not calculate SHA-256 hash for downloaded forge, aborting installation"
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn verification_rejects_unhashed_optional_bin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let version_dir = config.version_dir(config.network.repo, "v1.0.0");
+        fs::create_dir_all(&version_dir).unwrap();
+        let hashes = write_required_hashed_bins(&version_dir, &config);
+        write_executable(&version_dir.join(bin_name("solar")), b"solar");
+
+        assert_eq!(
+            installed_bins_status(&config, &version_dir, &hashes).unwrap(),
+            InstalledBinsStatus::Unverifiable(bin_name("solar"))
+        );
+        let err = verify_binaries(&config, &version_dir, &hashes).unwrap_err();
+        assert!(err.to_string().contains("one or more binaries failed"));
+    }
+
+    #[test]
+    fn verification_accepts_hashed_optional_bin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let version_dir = config.version_dir(config.network.repo, "v1.0.0");
+        fs::create_dir_all(&version_dir).unwrap();
+        let mut hashes = write_required_hashed_bins(&version_dir, &config);
+        write_hashed_bin(&version_dir, &mut hashes, "solar");
+
+        assert_eq!(
+            installed_bins_status(&config, &version_dir, &hashes).unwrap(),
+            InstalledBinsStatus::Verified
+        );
+        verify_binaries(&config, &version_dir, &hashes).unwrap();
+    }
+
+    #[test]
+    fn clear_active_bin_removes_bare_and_exe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        fs::create_dir_all(&config.bin_dir).unwrap();
+
+        // Simulate a stale bare `forge` (e.g. from the legacy bash foundryup)
+        // alongside a stale `forge.exe`.
+        fs::write(config.bin_dir.join("forge"), b"stale").unwrap();
+        fs::write(config.bin_dir.join("forge.exe"), b"stale").unwrap();
+
+        clear_active_bin(&config, "forge").unwrap();
+
+        assert!(!config.bin_dir.join("forge").exists(), "bare forge should be removed");
+        assert!(!config.bin_dir.join("forge.exe").exists(), "forge.exe should be removed");
+    }
+
+    #[test]
+    fn clear_active_bin_ok_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        fs::create_dir_all(&config.bin_dir).unwrap();
+
+        // Nothing to remove: clearing must still succeed.
+        clear_active_bin(&config, "forge").unwrap();
     }
 }

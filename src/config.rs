@@ -74,6 +74,9 @@ impl Config {
 
             if self.is_legacy_version_dir(&path) {
                 let new_path = self.version_dir(default_repo, &name);
+                if new_path.exists() {
+                    continue;
+                }
                 fs::create_dir_all(new_path.parent().unwrap())?;
                 say!("migrating legacy version '{name}' to {default_repo}/{name}");
                 fs::rename(&path, &new_path)?;
@@ -84,7 +87,7 @@ impl Config {
     }
 
     fn is_legacy_version_dir(&self, path: &Path) -> bool {
-        for bin in NetworkConfig::FOUNDRY.bins {
+        for &Bin { name: bin, .. } in NetworkConfig::FOUNDRY.bins {
             let bin_name = if cfg!(windows) { format!("{bin}.exe") } else { bin.to_string() };
             if path.join(&bin_name).exists() {
                 return true;
@@ -126,17 +129,29 @@ impl Config {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NetworkConfig {
     pub repo: &'static str,
-    pub bins: &'static [&'static str],
+    pub bins: &'static [Bin],
     pub archive_prefix: &'static str,
     pub default_version: &'static str,
     pub display_name: &'static str,
     pub has_attestation: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Bin {
+    pub optional: bool,
+    pub name: &'static str,
+}
+
 impl NetworkConfig {
     pub(crate) const FOUNDRY: Self = Self {
         repo: "foundry-rs/foundry",
-        bins: &["forge", "cast", "anvil", "chisel"],
+        bins: &[
+            Bin { optional: false, name: "forge" },
+            Bin { optional: false, name: "cast" },
+            Bin { optional: false, name: "anvil" },
+            Bin { optional: false, name: "chisel" },
+            Bin { optional: true, name: "solar" },
+        ],
         archive_prefix: "foundry",
         default_version: "stable",
         display_name: "foundry",

@@ -46,6 +46,7 @@ All other options are passed to foundryup after installation.
 Environment variables:
   FOUNDRYUP_VERSION              Install a specific version of foundryup
   FOUNDRYUP_IGNORE_VERIFICATION  Skip attestation verification if set to "true"
+  FOUNDRYUP_MAX_RETRIES          Retries after a failed download (default: 5)
 EOF
 }
 
@@ -133,8 +134,7 @@ main() {
         say "skipping attestation verification (--force or FOUNDRYUP_IGNORE_VERIFICATION set)"
     else
         say "downloading attestation..."
-        # Use curl/wget directly to avoid the downloader's exit-on-404 behavior
-        if try_download "$_attestation_url" "$_attestation_file"; then
+        if download_optional "$_attestation_url" "$_attestation_file"; then
             local _attestation_artifact_link
             _attestation_artifact_link="$(head -n1 "$_attestation_file" | tr -d '\r')"
 
@@ -142,7 +142,7 @@ main() {
                 say "verifying attestation..."
                 local _sigstore_file="${_dir}/attestation.sigstore.json"
 
-                if try_download "${_attestation_artifact_link}/download" "$_sigstore_file"; then
+                if download_optional "${_attestation_artifact_link}/download" "$_sigstore_file"; then
                     # Extract the payload from the sigstore JSON and decode it
                     local _payload_b64
                     local _payload_json
@@ -335,15 +335,91 @@ compute_sha256() {
     fi
 }
 
-# Download without exiting on failure (used for optional files like attestations)
+# Shared transport for binary and attestation downloads. Keep the retry count,
+# HTTP statuses and 1, 2, 4, 8, 16 second backoff in sync with src/retry.rs.
+# RETVAL is the final HTTP status, used by callers to distinguish a missing file.
 try_download() {
+    local _dld
     if check_cmd curl; then
-        curl --proto '=https' --tlsv1.2 --silent --fail --location "$1" --output "$2" 2>/dev/null
+        _dld=curl
     elif check_cmd wget; then
-        wget --https-only --secure-protocol=TLSv1_2 -q "$1" -O "$2" 2>/dev/null
+        _dld=wget
     else
-        return 1
+        err "need 'curl' or 'wget'"
     fi
+
+    local _max_retries
+    _max_retries=$(awk -v value="${FOUNDRYUP_MAX_RETRIES:-}" 'BEGIN {
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+        if (value ~ /^[+]?[0-9]+$/ && value + 0 <= 4294967295) printf "%.0f\n", value
+        else print 5
+    }')
+    local _attempt=0
+    local _delay=1
+    local _status
+    local _http_status
+    local _err
+    local _retryable
+    local _host="${1#https://}"
+    _host="${_host%%/*}"
+    _host="${_host%%:*}"
+    _host="${_host%.}"
+
+    while :; do
+        # Overwrite the destination on every attempt; never append partial bytes.
+        if [ "$_dld" = curl ]; then
+            if _http_status=$(curl --proto '=https' --tlsv1.2 --silent --show-error --fail --location \
+                --write-out '%{http_code}' "$1" --output "$2"); then
+                RETVAL="$_http_status"
+                return 0
+            else
+                _status=$?
+            fi
+        else
+            # Disable wget's own retry loop so both transports have one budget.
+            if _err=$(LC_ALL=C wget --https-only --secure-protocol=TLSv1_2 --server-response --tries=1 \
+                "$1" -O "$2" 2>&1); then
+                RETVAL=200
+                return 0
+            else
+                _status=$?
+            fi
+            _http_status=$(printf '%s\n' "$_err" | awk '$1 ~ /^HTTP\// { code=$2 } END { print code }')
+            warn "$_err"
+        fi
+        RETVAL="$_http_status"
+        _retryable=false
+        case "$_dld:$_status" in
+            curl:22|wget:8)
+                case "$_http_status" in
+                    403|408|429|500|502|503|504) _retryable=true ;;
+                esac
+                ;;
+            # curl setup/local I/O errors and permanent HTTP errors are not transient.
+            curl:1|curl:2|curl:3|curl:4|curl:23|curl:26|curl:27) ;;
+            curl:*|wget:4|wget:5) _retryable=true ;;
+        esac
+        case "$_host" in
+            github.com|*.github.com|githubusercontent.com|*.githubusercontent.com) ;;
+            *) _retryable=false ;;
+        esac
+        if [ "$_retryable" = false ] || [ "$_attempt" -ge "$_max_retries" ]; then
+            return "$_status"
+        fi
+        _attempt=$((_attempt + 1))
+        warn "download failed; retrying in ${_delay}s (${_attempt}/${_max_retries})"
+        sleep "$_delay"
+        if [ "$_delay" -lt 16 ]; then _delay=$((_delay * 2)); fi
+    done
+}
+
+# Only a genuine 404 is optional. Exhausted transient errors must not skip verification.
+download_optional() {
+    if try_download "$1" "$2"; then
+        return 0
+    fi
+    if [ "$RETVAL" = 404 ]; then return 1; fi
+    err "failed to download $1"
 }
 
 ensure() {
@@ -357,43 +433,21 @@ ignore() {
 }
 
 downloader() {
-    local _dld
-    local _err
     local _status
 
-    if check_cmd curl; then
-        _dld=curl
-    elif check_cmd wget; then
-        _dld=wget
-    else
-        _dld='curl or wget'
-    fi
-
     if [ "$1" = --check ]; then
-        need_cmd "$_dld"
-    elif [ "$_dld" = curl ]; then
-        _err=$(curl --proto '=https' --tlsv1.2 --silent --show-error --fail --location "$1" --output "$2" 2>&1)
-        _status=$?
-        if [ -n "$_err" ]; then
-            warn "$_err"
-            if echo "$_err" | grep -q 404; then
-                err "binary for platform '$3' not found, this may be unsupported"
-            fi
-        fi
-        return $_status
-    elif [ "$_dld" = wget ]; then
-        _err=$(wget --https-only --secure-protocol=TLSv1_2 "$1" -O "$2" 2>&1)
-        _status=$?
-        if [ -n "$_err" ]; then
-            warn "$_err"
-            if echo "$_err" | grep -q '404'; then
-                err "binary for platform '$3' not found, this may be unsupported"
-            fi
-        fi
-        return $_status
-    else
-        err "unknown downloader"
+        if ! check_cmd curl && ! check_cmd wget; then err "need 'curl' or 'wget'"; fi
+        return 0
     fi
+    if try_download "$1" "$2"; then
+        return 0
+    else
+        _status=$?
+    fi
+    if [ "$RETVAL" = 404 ]; then
+        err "binary for platform '$3' not found, this may be unsupported"
+    fi
+    return "$_status"
 }
 
 main "$@" || exit 1

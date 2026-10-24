@@ -18,6 +18,7 @@ mod download;
 mod install;
 mod platform;
 mod process;
+mod retry;
 mod self_update;
 
 use cli::Cli;
@@ -84,7 +85,15 @@ async fn run(cli: Cli) -> Result<()> {
         // An empty `--use` value is rejected at parse time by `parse_use_version`, so `version` is
         // always non-empty here.
         let repo = cli.repo.as_deref().unwrap_or(config.network.repo);
-        return install::use_version_resolved(&config, repo, version, cli.repo.is_some()).await;
+        return install::use_version_resolved(
+            &config,
+            repo,
+            version,
+            cli.repo.is_some(),
+            cli.platform.as_deref(),
+            cli.arch.as_deref(),
+        )
+        .await;
     }
 
     if cli.network.is_some() {
@@ -107,8 +116,13 @@ async fn run(cli: Cli) -> Result<()> {
     }
     .await;
 
-    // Report the update status regardless of whether the install succeeded; a
-    // failure of the background check itself must not mask an install error.
+    // Do not delay or mix an unrelated update status into failed-install
+    // output. A failed update check must not mask an install error either.
+    if install_result.is_err() {
+        update_handle.abort();
+        return install_result;
+    }
+
     match update_handle.await {
         Ok(update) => print_update(update),
         Err(e) => warn!("Could not check for updates: {e}"),

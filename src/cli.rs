@@ -9,7 +9,9 @@ use clap::{CommandFactory, Parser};
 #[command(name = "foundryup", version = crate::config::LONG_VERSION, about, disable_version_flag = true)]
 pub(crate) struct Cli {
     /// Update foundryup to the latest version
-    #[arg(short = 'U', long = "update")]
+    // Error instead of silently updating when combined with `--list`/`--use`.
+    // Not conflicted with env-bound options, so `FOUNDRYUP_VERSION=x -U` works.
+    #[arg(short = 'U', long = "update", conflicts_with_all = ["list", "use_version"])]
     pub update: bool,
 
     /// Build and install from a remote GitHub repo (uses default branch if no other options)
@@ -68,7 +70,7 @@ pub(crate) struct Cli {
     #[arg(short = 'n', long, hide = true, env = "FOUNDRYUP_NETWORK", hide_env = true)]
     pub network: Option<String>,
 
-    /// Skip SHA verification (INSECURE)
+    /// Skip Sigstore and SHA verification (INSECURE)
     #[arg(short = 'f', long)]
     pub force: bool,
 
