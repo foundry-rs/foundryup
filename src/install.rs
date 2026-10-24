@@ -268,10 +268,6 @@ fn profile_target_dir(profile: &str) -> &str {
     if profile == "dev" { "debug" } else { profile }
 }
 
-fn built_bin_path(built: &BuiltBins, bin: &str) -> PathBuf {
-    built.build_dir.join(bin_name(bin))
-}
-
 fn clear_built_bins(config: &Config, build_dir: &Path) -> Result<()> {
     for &Bin { name: bin, .. } in config.network.bins {
         remove_if_exists(&build_dir.join(bin_name(bin)))?;
@@ -287,7 +283,7 @@ fn copy_built_bins_to_version_dir(
     clear_version_bins(config, version_dir)?;
 
     for &Bin { optional, name: bin } in config.network.bins {
-        let src = built_bin_path(built, bin);
+        let src = built.build_dir.join(bin_name(bin));
         if src.is_file() {
             let dest = version_dir.join(bin_name(bin));
             remove_if_exists(&dest)?;
@@ -445,7 +441,7 @@ fn missing_attestation(tag: &str) -> Result<PrebuiltCheck> {
 }
 
 fn attestation_required(tag: &str) -> bool {
-    if tag == "nightly" || tag.starts_with("nightly-") {
+    if is_nightly_tag(tag) {
         return true;
     }
 
@@ -605,7 +601,7 @@ fn verify_nightly_source_commit(payload: &AttestationPayload, repo: &str, tag: &
 }
 
 fn release_workflow_identity(repo: &str, tag: &str) -> String {
-    let git_ref = if tag == "nightly" || tag.starts_with("nightly-") {
+    let git_ref = if is_nightly_tag(tag) {
         "refs/heads/master".to_string()
     } else {
         format!("refs/tags/{tag}")
@@ -991,23 +987,71 @@ pub(crate) async fn use_version_resolved(
         version.to_string()
     };
 
-    if config.version_dir(repo, &tag).is_dir() {
-        return use_version(config, repo, &tag);
+    let repo =
+        installed_repo(config, repo, &tag, !repo_explicit)?.unwrap_or_else(|| repo.to_string());
+    use_version(config, &repo, &tag)
+}
+
+/// Resolves the installed toolchain `name` to its directory without network access.
+///
+/// Names are looked up like `--use`, except that `stable` and `latest` select the newest
+/// installed release and `nightly` the most recently installed nightly.
+pub(crate) fn installed_toolchain_dir(config: &Config, name: &str) -> Result<PathBuf> {
+    let repo = config.network.repo;
+    let installed = || {
+        fs::read_dir(config.versions_dir.join(repo))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .filter_map(|entry| Some((entry.file_name().into_string().ok()?, entry.path())))
+    };
+    let channel = match name {
+        "stable" | "latest" => installed()
+            .filter_map(|(tag, dir)| {
+                let version = Version::parse(tag.strip_prefix('v')?).ok()?;
+                version.pre.is_empty().then_some((version, dir))
+            })
+            .max()
+            .map(|(_, dir)| dir),
+        "nightly" => installed()
+            .filter(|(tag, _)| is_nightly_tag(tag))
+            .filter_map(|(_, dir)| Some((fs::metadata(&dir).ok()?.modified().ok()?, dir)))
+            .max()
+            .map(|(_, dir)| dir),
+        _ => None,
+    };
+    if let Some(dir) = channel {
+        return Ok(dir);
     }
 
-    if !repo_explicit && let Some(found_repo) = find_unique_repo_for_version(config, &tag)? {
-        return use_version(config, &found_repo, &tag);
-    }
+    let tag =
+        if looks_like_version_number(name) { normalize_version(name).1 } else { name.to_string() };
+    let repo = installed_repo(config, repo, &tag, true)?.ok_or_else(|| {
+        eyre::eyre!(
+            "toolchain '{name}' is not installed; install it with `foundryup --install {name}`"
+        )
+    })?;
+    Ok(config.version_dir(&repo, &tag))
+}
 
-    use_version(config, repo, &tag)
+/// Returns the repo that has `tag` installed: `repo` itself or, when `search_all` is set, the
+/// only installed repo that has it.
+fn installed_repo(
+    config: &Config,
+    repo: &str,
+    tag: &str,
+    search_all: bool,
+) -> Result<Option<String>> {
+    if config.version_dir(repo, tag).is_dir() {
+        return Ok(Some(repo.to_string()));
+    }
+    if search_all { find_unique_repo_for_version(config, tag) } else { Ok(None) }
 }
 
 /// Finds the version directory named `version` across all installed repos,
 /// erroring if more than one repo matches.
-pub(crate) fn find_unique_repo_for_version(
-    config: &Config,
-    version: &str,
-) -> Result<Option<String>> {
+fn find_unique_repo_for_version(config: &Config, version: &str) -> Result<Option<String>> {
     if !config.versions_dir.exists() {
         return Ok(None);
     }
@@ -1099,26 +1143,36 @@ fn activate(config: &Config, dir: &Path, label: &str) -> Result<()> {
         .network
         .bins
         .iter()
-        .map(|bin| get_bin_version(&config.bin_path(bin.name)).ok())
+        .map(|bin| {
+            let new = dir.join(bin_name(bin.name));
+            new.is_file().then(|| get_bin_version(&config.bin_path(bin.name)).ok()).flatten()
+        })
         .collect::<Vec<_>>();
 
     config.set_default_toolchain(dir)?;
 
-    let proxy = std::env::current_exe()?;
+    // Prefer the installed foundryup, which outlives a copy run from elsewhere.
+    let proxy = match config.bin_path("foundryup") {
+        installed if installed.is_file() => installed,
+        _ => std::env::current_exe()?,
+    };
     for (&Bin { name: bin, .. }, old_version) in config.network.bins.iter().zip(old_versions) {
+        let dest = config.bin_path(bin);
         if !dir.join(bin_name(bin)).is_file() {
             clear_active_bin(config, bin)?;
             continue;
         }
 
-        let dest = config.bin_path(bin);
-        clear_active_bin(config, bin)?;
-
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&proxy, &dest)?;
-        #[cfg(not(unix))]
-        if fs::hard_link(&proxy, &dest).is_err() {
-            fs::copy(&proxy, &dest)?;
+        // Keep proxies that are already in place: Windows cannot remove a hard link to the
+        // running foundryup.
+        if !same_file::is_same_file(&proxy, &dest).unwrap_or(false) {
+            clear_active_bin(config, bin)?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&proxy, &dest)?;
+            #[cfg(not(unix))]
+            if fs::hard_link(&proxy, &dest).is_err() {
+                fs::copy(&proxy, &dest)?;
+            }
         }
 
         let v = get_bin_version(&dest)
@@ -1429,7 +1483,7 @@ fn latest_nightly_release_tag(json: &str, repo: &str) -> Result<String> {
         .ok_or_else(|| eyre::eyre!("could not find a nightly release tag for {repo}"))
 }
 
-pub(crate) fn normalize_version(version: &str) -> (String, String) {
+fn normalize_version(version: &str) -> (String, String) {
     // Only concrete `nightly-<sha>` tags map to the nightly channel here; the
     // bare `nightly` channel is resolved earlier.
     if version.starts_with("nightly-") {
@@ -1440,6 +1494,10 @@ pub(crate) fn normalize_version(version: &str) -> (String, String) {
     } else {
         (version.to_string(), version.to_string())
     }
+}
+
+fn is_nightly_tag(tag: &str) -> bool {
+    tag == "nightly" || tag.starts_with("nightly-")
 }
 
 pub(crate) fn bin_name(name: &str) -> String {
@@ -1493,7 +1551,9 @@ fn is_executable(path: &Path) -> bool {
 }
 
 fn get_bin_version(path: &Path) -> Result<String> {
-    let output = std::process::Command::new(path).arg("-V").output()?;
+    // Proxies in the bin dir must report the toolchain they run by default.
+    let output =
+        std::process::Command::new(path).arg("-V").env_remove("FOUNDRYUP_TOOLCHAIN").output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stderr = stderr.trim();

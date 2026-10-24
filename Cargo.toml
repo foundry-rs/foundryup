@@ -75,6 +75,7 @@ sigstore-verify = { version = "0.11", default-features = false }
 sysinfo = "0.36"
 tar = "0.4"
 tempfile = "3"
+same-file = "1"
 self-replace = "1"
 time = { version = "0.3", features = ["parsing"] }
 which = "8"

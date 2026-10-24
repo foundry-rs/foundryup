@@ -20,12 +20,6 @@ fn setup(toolchains: &[&str]) -> (tempfile::TempDir, PathBuf) {
     (temp_dir, foundry_dir)
 }
 
-fn proxy(foundry_dir: &Path, bin: &str) -> Command {
-    Command::new(foundry_dir.join(format!("bin/{bin}{EXE_SUFFIX}")))
-        .env("FOUNDRY_DIR", foundry_dir)
-        .env_remove("FOUNDRYUP_TOOLCHAIN")
-}
-
 #[test]
 fn runs_default_toolchain() {
     let (_temp_dir, foundry_dir) =
@@ -112,6 +106,59 @@ anvil v1.0.0
 "#]]);
 }
 
+// An exported `FOUNDRYUP_TOOLCHAIN` does not change what `foundryup --use` activates or reports.
+#[test]
+fn env_does_not_affect_activation() {
+    let (_temp_dir, foundry_dir) =
+        setup(&["foundry-rs/foundry/v1.0.0", "foundry-rs/foundry/v2.0.0"]);
+
+    foundryup()
+        .env("FOUNDRY_DIR", &foundry_dir)
+        .env("FOUNDRYUP_TOOLCHAIN", "v1.0.0")
+        .args(["--use", "v2.0.0"])
+        .assert()
+        .success()
+        .stderr_eq(str![[r#"
+foundryup: use - forge v2.0.0 (from forge v1.0.0)
+...
+"#]]);
+    proxy(&foundry_dir, "forge").arg("-V").assert().success().stdout_eq(str![[r#"
+forge v2.0.0
+
+"#]]);
+}
+
+// Activation links the proxies to the installed foundryup even when run from elsewhere, and
+// activating again from it keeps them, since Windows cannot remove hard links to the running
+// executable.
+#[test]
+fn reactivation_from_installed_foundryup() {
+    let (_temp_dir, foundry_dir) =
+        setup(&["foundry-rs/foundry/v1.0.0", "foundry-rs/foundry/v2.0.0"]);
+    let installed = foundry_dir.join(format!("bin/foundryup{EXE_SUFFIX}"));
+    std::fs::copy(snapbox::cmd::cargo_bin!("foundryup"), &installed).unwrap();
+
+    foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["--use", "v2.0.0"]).assert().success();
+    #[cfg(unix)]
+    for bin in BINS {
+        assert_eq!(
+            std::fs::read_link(foundry_dir.join("bin").join(bin)).unwrap(),
+            installed,
+            "{bin} does not link to the installed foundryup"
+        );
+    }
+
+    Command::new(&installed)
+        .env("FOUNDRY_DIR", &foundry_dir)
+        .args(["--use", "v1.0.0"])
+        .assert()
+        .success();
+    proxy(&foundry_dir, "forge").arg("-V").assert().success().stdout_eq(str![[r#"
+forge v1.0.0
+
+"#]]);
+}
+
 // `stable` and `latest` select the highest installed release by semver, ignoring prereleases.
 #[test]
 fn stable_selects_newest_release() {
@@ -153,12 +200,20 @@ forge nightly-aaa
 "#]]);
 }
 
-// Builds from other repos are found by name, as with `foundryup --use`.
+// Other names are looked up like `foundryup --use`: digit-prefixed names that are not version
+// numbers stay verbatim, and builds from other repos are found by name.
 #[test]
-fn finds_custom_repo_toolchain() {
-    let (_temp_dir, foundry_dir) =
-        setup(&["foundry-rs/foundry/v1.0.0", "someone/foundry/someone-branch-x"]);
+fn names_match_use() {
+    let (_temp_dir, foundry_dir) = setup(&[
+        "foundry-rs/foundry/v1.0.0",
+        "foundry-rs/foundry/123abc",
+        "someone/foundry/someone-branch-x",
+    ]);
 
+    proxy(&foundry_dir, "chisel").args(["+123abc", "-V"]).assert().success().stdout_eq(str![[r#"
+chisel 123abc
+
+"#]]);
     proxy(&foundry_dir, "chisel").args(["+someone-branch-x", "-V"]).assert().success().stdout_eq(
         str![[r#"
 chisel someone-branch-x

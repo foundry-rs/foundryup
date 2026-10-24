@@ -7,12 +7,10 @@
 
 use crate::{
     config::{Config, NetworkConfig},
-    install::{bin_name, find_unique_repo_for_version, normalize_version},
+    install::{bin_name, installed_toolchain_dir},
     say,
 };
 use eyre::{Result, WrapErr, bail};
-use fs_err as fs;
-use semver::Version;
 use std::{
     convert::Infallible,
     path::{Path, PathBuf},
@@ -50,10 +48,9 @@ fn run(bin: &str) -> Result<Infallible> {
     }
 
     let config = installation()?;
-    let name =
-        plus.clone().or_else(|| std::env::var(TOOLCHAIN_ENV).ok().filter(|name| !name.is_empty()));
+    let name = plus.or_else(|| std::env::var(TOOLCHAIN_ENV).ok().filter(|name| !name.is_empty()));
     let dir = match &name {
-        Some(name) => resolve_toolchain(&config, name)?,
+        Some(name) => installed_toolchain_dir(&config, name)?,
         None => config.default_toolchain()?,
     };
 
@@ -65,7 +62,7 @@ fn run(bin: &str) -> Result<Infallible> {
     let mut cmd = Command::new(&path);
     cmd.args(args);
     // Nested invocations, such as `cast` run by a `forge` script, use the same toolchain.
-    if let Some(name) = plus {
+    if let Some(name) = name {
         cmd.env(TOOLCHAIN_ENV, name);
     }
     exec(&mut cmd).wrap_err_with(|| format!("failed to run {}", path.display()))
@@ -86,50 +83,6 @@ fn installation() -> Result<Config> {
         }
     }
     Config::new()
-}
-
-/// Resolves the toolchain `name` to its directory without network access.
-///
-/// `stable` and `latest` select the newest installed stable release, and `nightly` the most
-/// recently installed nightly. Other names are looked up like `foundryup --use`.
-fn resolve_toolchain(config: &Config, name: &str) -> Result<PathBuf> {
-    let repo = config.network.repo;
-    let installed = || {
-        fs::read_dir(config.versions_dir.join(repo))
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|entry| entry.path().is_dir())
-            .filter_map(|entry| Some((entry.file_name().into_string().ok()?, entry.path())))
-    };
-    let channel = match name {
-        "stable" | "latest" => installed()
-            .filter_map(|(version, dir)| {
-                let version = Version::parse(version.strip_prefix('v')?).ok()?;
-                version.pre.is_empty().then_some((version, dir))
-            })
-            .max_by(|(a, _), (b, _)| a.cmp(b))
-            .map(|(_, dir)| dir),
-        "nightly" => installed()
-            .filter(|(version, _)| version == "nightly" || version.starts_with("nightly-"))
-            .filter_map(|(_, dir)| Some((fs::metadata(&dir).ok()?.modified().ok()?, dir)))
-            .max_by_key(|&(modified, _)| modified)
-            .map(|(_, dir)| dir),
-        _ => None,
-    };
-    if let Some(dir) = channel {
-        return Ok(dir);
-    }
-
-    let (_, tag) = normalize_version(name);
-    let dir = config.version_dir(repo, &tag);
-    if dir.is_dir() {
-        return Ok(dir);
-    }
-    if let Some(repo) = find_unique_repo_for_version(config, &tag)? {
-        return Ok(config.version_dir(&repo, &tag));
-    }
-    bail!("toolchain '{name}' is not installed; install it with `foundryup --install {name}`")
 }
 
 #[cfg(unix)]

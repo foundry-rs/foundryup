@@ -1,7 +1,10 @@
 use crate::say;
 use eyre::Result;
 use fs_err as fs;
-use std::path::{Path, PathBuf};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -151,7 +154,11 @@ impl Config {
         let dir = dir
             .to_str()
             .ok_or_else(|| eyre::eyre!("toolchain path is not valid UTF-8: {}", dir.display()))?;
-        fs::write(self.default_toolchain_file(), dir)?;
+        // Replace the file atomically so that a proxy starting meanwhile never reads it
+        // half-written.
+        let mut file = tempfile::NamedTempFile::new_in(&self.foundry_dir)?;
+        file.write_all(dir.as_bytes())?;
+        file.persist(self.default_toolchain_file())?;
         Ok(())
     }
 }

@@ -13,6 +13,13 @@ fn foundryup() -> Command {
     Command::new(snapbox::cmd::cargo_bin!("foundryup")).env("NO_COLOR", "1")
 }
 
+/// Runs `bin` from the bin dir of `foundry_dir`.
+fn proxy(foundry_dir: &Path, bin: &str) -> Command {
+    Command::new(foundry_dir.join(format!("bin/{bin}{EXE_SUFFIX}")))
+        .env("FOUNDRY_DIR", foundry_dir)
+        .env_remove("FOUNDRYUP_TOOLCHAIN")
+}
+
 /// Writes a stand-in for a Foundry binary at `path`, built from `tests/fixtures/fake_bin.rs`.
 ///
 /// A link to the `foundryup` test binary would run as a toolchain proxy because of its name, so,
@@ -432,12 +439,7 @@ fn use_version_missing_bin_leaves_previous_active() {
 
     // ...and every active binary must still run v1.0.0, not a mix.
     for &bin in BINS {
-        Command::new(foundry_dir.join(format!("bin/{bin}{EXE_SUFFIX}")))
-            .env("FOUNDRY_DIR", &foundry_dir)
-            .arg("-V")
-            .assert()
-            .success()
-            .stdout_eq(format!("{bin} v1.0.0\n"));
+        proxy(&foundry_dir, bin).arg("-V").assert().success().stdout_eq(format!("{bin} v1.0.0\n"));
     }
 }
 
@@ -479,12 +481,7 @@ fn use_version_broken_bin_leaves_previous_active() {
 
     // ...and every active binary must still run v1.0.0, not a mix.
     for &bin in BINS {
-        Command::new(foundry_dir.join(format!("bin/{bin}{EXE_SUFFIX}")))
-            .env("FOUNDRY_DIR", &foundry_dir)
-            .arg("-V")
-            .assert()
-            .success()
-            .stdout_eq(format!("{bin} v1.0.0\n"));
+        proxy(&foundry_dir, bin).arg("-V").assert().success().stdout_eq(format!("{bin} v1.0.0\n"));
     }
 }
 

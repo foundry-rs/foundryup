@@ -32,6 +32,9 @@ does. Without it, the `FOUNDRYUP_TOOLCHAIN` environment variable or else the ver
 activated by `foundryup` or `foundryup --use` runs. Versions are never downloaded on demand;
 install them first with `foundryup --install <version>`.
 
+The binaries themselves live in `~/.foundry/versions/<owner>/<repo>/<version>`; copy them from
+there rather than from `~/.foundry/bin`.
+
 ## Release verification
 
 Prebuilt releases from `v1.3.0-rc1` onward require a valid Sigstore bundle signed by the
