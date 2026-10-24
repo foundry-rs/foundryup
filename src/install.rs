@@ -1151,11 +1151,7 @@ fn activate(config: &Config, dir: &Path, label: &str) -> Result<()> {
 
     config.set_default_toolchain(dir)?;
 
-    // Prefer the installed foundryup, which outlives a copy run from elsewhere.
-    let proxy = match config.bin_path("foundryup") {
-        installed if installed.is_file() => installed,
-        _ => std::env::current_exe()?,
-    };
+    let proxy = std::env::current_exe()?;
     for (&Bin { name: bin, .. }, old_version) in config.network.bins.iter().zip(old_versions) {
         let dest = config.bin_path(bin);
         if !dir.join(bin_name(bin)).is_file() {

@@ -128,35 +128,31 @@ forge v2.0.0
 "#]]);
 }
 
-// Activation links the proxies to the installed foundryup even when run from elsewhere, and
-// activating again from it keeps them, since Windows cannot remove hard links to the running
-// executable.
+// Activating again from the foundryup that the proxies link to keeps them, since Windows cannot
+// remove hard links to the running executable.
 #[test]
-fn reactivation_from_installed_foundryup() {
+fn reactivation_from_linked_foundryup() {
     let (_temp_dir, foundry_dir) =
         setup(&["foundry-rs/foundry/v1.0.0", "foundry-rs/foundry/v2.0.0"]);
     let installed = foundry_dir.join(format!("bin/foundryup{EXE_SUFFIX}"));
     std::fs::copy(snapbox::cmd::cargo_bin!("foundryup"), &installed).unwrap();
 
-    foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["--use", "v2.0.0"]).assert().success();
-    #[cfg(unix)]
-    for bin in BINS {
-        assert_eq!(
-            std::fs::read_link(foundry_dir.join("bin").join(bin)).unwrap(),
-            installed,
-            "{bin} does not link to the installed foundryup"
-        );
+    for version in ["v2.0.0", "v1.0.0"] {
+        Command::new(&installed)
+            .env("FOUNDRY_DIR", &foundry_dir)
+            .args(["--use", version])
+            .assert()
+            .success();
     }
 
-    Command::new(&installed)
-        .env("FOUNDRY_DIR", &foundry_dir)
-        .args(["--use", "v1.0.0"])
-        .assert()
-        .success();
     proxy(&foundry_dir, "forge").arg("-V").assert().success().stdout_eq(str![[r#"
 forge v1.0.0
 
 "#]]);
+    #[cfg(unix)]
+    for bin in BINS {
+        assert_eq!(std::fs::read_link(foundry_dir.join("bin").join(bin)).unwrap(), installed);
+    }
 }
 
 // `stable` and `latest` select the highest installed release by semver, ignoring prereleases.

@@ -158,6 +158,9 @@ impl Config {
         // half-written.
         let mut file = tempfile::NamedTempFile::new_in(&self.foundry_dir)?;
         file.write_all(dir.as_bytes())?;
+        // Temporary files are private, but the proxies may run as other users.
+        #[cfg(unix)]
+        file.as_file().set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o644))?;
         file.persist(self.default_toolchain_file())?;
         Ok(())
     }
