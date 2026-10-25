@@ -39,7 +39,7 @@ zip.opt-level = 3
 zlib-rs.opt-level = 3
 
 [build-dependencies]
-smolgen = { version = "0.1", features = ["build", "gitcl", "rustc"] }
+smolgen = { git = "https://github.com/alloy-rs/smolgen", rev = "1101d5c55038e15cebde8abc0061763dd61fa21f", features = ["build", "gitcl", "rustc"] }
 
 [dependencies]
 # async
