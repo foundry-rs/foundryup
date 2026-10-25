@@ -690,6 +690,7 @@ dependencies = [
  "color-eyre",
  "digest-io",
  "eyre",
+ "filetime",
  "flate2",
  "fs-err",
  "futures-util",

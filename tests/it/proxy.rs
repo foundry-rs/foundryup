@@ -52,6 +52,26 @@ forge v1.0.0
 "#]]);
 }
 
+// A proxy reached through a symlink outside the bin dir still finds its installation.
+#[cfg(unix)]
+#[test]
+fn symlinked_proxy_uses_own_installation() {
+    let (temp_dir, foundry_dir) = setup(&["foundry-rs/foundry/v1.0.0"]);
+    let link = temp_dir.path().join("elsewhere/bin/forge");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(foundry_dir.join("bin/forge"), &link).unwrap();
+
+    Command::new(&link)
+        .env("FOUNDRY_DIR", temp_dir.path().join("elsewhere"))
+        .arg("-V")
+        .assert()
+        .success()
+        .stdout_eq(str![[r#"
+forge v1.0.0
+
+"#]]);
+}
+
 #[test]
 fn plus_selects_toolchain() {
     let (_temp_dir, foundry_dir) =
@@ -181,8 +201,7 @@ forge v1.10.0
     }
 }
 
-// `nightly` selects the most recently installed nightly, not the last one by name.
-#[cfg(unix)]
+// `nightly` selects the most recently installed or activated nightly, not the last one by name.
 #[test]
 fn nightly_selects_latest_install() {
     let (_temp_dir, foundry_dir) = setup(&[
@@ -190,14 +209,19 @@ fn nightly_selects_latest_install() {
         "foundry-rs/foundry/nightly-aaa",
         "foundry-rs/foundry/nightly-bbb",
     ]);
-    let older = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
-    std::fs::File::open(foundry_dir.join("versions/foundry-rs/foundry/nightly-bbb"))
-        .unwrap()
-        .set_modified(older)
-        .unwrap();
+    let nightly_bbb = foundry_dir.join("versions/foundry-rs/foundry/nightly-bbb");
+    let an_hour_ago =
+        filetime::FileTime::from_unix_time(filetime::FileTime::now().unix_seconds() - 3600, 0);
+    filetime::set_file_mtime(&nightly_bbb, an_hour_ago).unwrap();
 
     proxy(&foundry_dir, "forge").args(["+nightly", "-V"]).assert().success().stdout_eq(str![[r#"
 forge nightly-aaa
+
+"#]]);
+
+    foundryup().env("FOUNDRY_DIR", &foundry_dir).args(["--use", "nightly-bbb"]).assert().success();
+    proxy(&foundry_dir, "forge").args(["+nightly", "-V"]).assert().success().stdout_eq(str![[r#"
+forge nightly-bbb
 
 "#]]);
 }

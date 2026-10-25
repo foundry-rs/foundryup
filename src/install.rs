@@ -318,6 +318,7 @@ async fn generate_manpages_from_source(config: &Config) -> Result<()> {
         let status = tokio::process::Command::new("help2man")
             .arg("-N")
             .arg(&bin_path)
+            .env_remove("FOUNDRYUP_TOOLCHAIN")
             .stdout(std::process::Stdio::from(man_file.into_parts().0))
             .status()
             .await
@@ -1114,7 +1115,13 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
 
     crate::process::check_bins_in_use(config)?;
 
-    activate(config, &version_dir, &format!("version {version}"))
+    activate(config, &version_dir, &format!("version {version}"))?;
+
+    // `+nightly` selects the nightly with the newest mtime, which must include reactivations.
+    if is_nightly_tag(version) {
+        filetime::set_file_mtime(&version_dir, filetime::FileTime::now())?;
+    }
+    Ok(())
 }
 
 /// Makes the toolchain in `dir` the default and links a proxy into the bin dir for each of its

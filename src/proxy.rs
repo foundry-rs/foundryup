@@ -74,13 +74,16 @@ fn run(bin: &str) -> Result<Infallible> {
 /// that was only set when installing.
 fn installation() -> Result<Config> {
     let arg0 = std::env::args_os().next().unwrap_or_default();
-    if let Ok(path) = which::which(arg0)
-        && let Some(foundry_dir) = path.parent().and_then(Path::parent)
-    {
-        let config = Config::with_foundry_dir(foundry_dir.to_path_buf());
-        if config.default_toolchain_file().is_file() {
-            return Ok(config);
+    // Follow symlinks to the proxy, such as `/usr/local/bin/forge -> <foundry dir>/bin/forge`.
+    let mut path = which::which(arg0).ok();
+    while let Some(link) = path {
+        if let Some(foundry_dir) = link.parent().and_then(Path::parent) {
+            let config = Config::with_foundry_dir(foundry_dir.to_path_buf());
+            if config.default_toolchain_file().is_file() {
+                return Ok(config);
+            }
         }
+        path = std::fs::read_link(&link).ok().map(|target| link.with_file_name(target));
     }
     Config::new()
 }
@@ -94,7 +97,18 @@ fn exec(cmd: &mut Command) -> Result<Infallible> {
 #[cfg(windows)]
 fn exec(cmd: &mut Command) -> Result<Infallible> {
     use windows_sys::{
-        Win32::{Foundation::TRUE, System::Console::SetConsoleCtrlHandler},
+        Win32::{
+            Foundation::{HANDLE, TRUE},
+            System::{
+                Console::SetConsoleCtrlHandler,
+                JobObjects::{
+                    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+                    SetInformationJobObject,
+                },
+                Threading::GetCurrentProcess,
+            },
+        },
         core::BOOL,
     };
 
@@ -102,9 +116,43 @@ fn exec(cmd: &mut Command) -> Result<Infallible> {
     unsafe extern "system" fn ignore_ctrl_c(_: u32) -> BOOL {
         TRUE
     }
-    // SAFETY: `ignore_ctrl_c` is a valid handler for the life of the process.
-    unsafe { SetConsoleCtrlHandler(Some(ignore_ctrl_c), TRUE) };
+
+    let set_limits = |job: HANDLE, flags: u32| {
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        info.BasicLimitInformation.LimitFlags = flags;
+        // SAFETY: `info` is a valid `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` of the given size.
+        unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&raw const info).cast(),
+                size_of_val(&info) as u32,
+            ) != 0
+        }
+    };
+
+    // SAFETY: `ignore_ctrl_c` is a valid handler for the life of the process, and the job handle
+    // is only used while it is open.
+    let job = unsafe {
+        SetConsoleCtrlHandler(Some(ignore_ctrl_c), TRUE);
+
+        // Like rustup, put this process in a job that kills the child when this process is
+        // terminated, such as by a test harness. Failures only lose that guarantee.
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if !job.is_null()
+            && set_limits(job, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+            && AssignProcessToJobObject(job, GetCurrentProcess()) != 0
+        {
+            Some(job)
+        } else {
+            None
+        }
+    };
 
     let status = cmd.status()?;
+    // Leave processes that the child started in the background running.
+    if let Some(job) = job {
+        set_limits(job, 0);
+    }
     std::process::exit(status.code().unwrap_or(1))
 }

@@ -28,7 +28,7 @@ FOUNDRYUP_TOOLCHAIN=stable forge build
 
 A leading `+<version>` argument picks the version for one command and for the Foundry binaries
 that command runs. `stable` (or `latest`) selects the newest installed release, `nightly` the most
-recently installed nightly, and other names match the installed versions as `foundryup --use`
+recently installed or activated nightly, and other names match the installed versions as `foundryup --use`
 does. Without it, the `FOUNDRYUP_TOOLCHAIN` environment variable or else the version last
 activated by `foundryup` or `foundryup --use` runs. Versions are never downloaded on demand;
 install them first with `foundryup --install <version>`.

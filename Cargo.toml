@@ -60,6 +60,7 @@ eyre = "0.6"
 
 # misc
 base64 = "0.23"
+filetime = "0.2"
 flate2 = "1"
 fs-err = "3"
 hex = "0.4"
@@ -87,7 +88,13 @@ tracing = "0.1"
 color-eyre = "0.6.5"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 snapbox = "1.2"
