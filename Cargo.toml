@@ -39,7 +39,7 @@ zip.opt-level = 3
 zlib-rs.opt-level = 3
 
 [build-dependencies]
-smolgen = { version = "0.1", features = ["build", "gitcl", "rustc"] }
+smolgen = { version = "0.1.1", features = ["build", "gitcl", "rustc"] }
 
 [dependencies]
 # async
