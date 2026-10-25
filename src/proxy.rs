@@ -38,11 +38,9 @@ pub(crate) fn main(bin: &str) -> ! {
 
 fn run(bin: &str) -> Result<Infallible> {
     let mut args = std::env::args_os().skip(1).peekable();
-    let plus = args.peek().and_then(|arg| arg.to_str()?.strip_prefix('+')).map(str::to_string);
-    if plus.is_some() {
-        args.next();
-    }
-
+    let plus = args
+        .next_if(|arg| arg.to_str().is_some_and(|arg| arg.starts_with('+')))
+        .map(|arg| arg.to_string_lossy()[1..].to_string());
     if plus.as_deref() == Some("") {
         bail!("missing toolchain name after '+'");
     }
@@ -62,8 +60,10 @@ fn run(bin: &str) -> Result<Infallible> {
     let mut cmd = Command::new(&path);
     cmd.args(args);
     // Nested invocations, such as `cast` run by a `forge` script, use the same toolchain.
-    if let Some(name) = name {
-        cmd.env(TOOLCHAIN_ENV, name);
+    if name.is_some()
+        && let Some(version) = dir.file_name()
+    {
+        cmd.env(TOOLCHAIN_ENV, version);
     }
     exec(&mut cmd).wrap_err_with(|| format!("failed to run {}", path.display()))
 }

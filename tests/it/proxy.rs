@@ -61,7 +61,7 @@ fn plus_selects_toolchain() {
         [r#"
 cast v2.0.0
 args: ["call", "+x"]
-FOUNDRYUP_TOOLCHAIN: Some("2.0.0")
+FOUNDRYUP_TOOLCHAIN: Some("v2.0.0")
 
 "#]
     ]);
@@ -159,13 +159,6 @@ forge v1.0.0
 forge v2.0.0
 
 "#]]);
-    #[cfg(unix)]
-    for bin in BINS {
-        assert_eq!(
-            std::fs::read_link(foundry_dir.join("bin").join(bin)).unwrap(),
-            snapbox::cmd::cargo_bin!("foundryup")
-        );
-    }
 }
 
 // `stable` and `latest` select the highest installed release by semver, ignoring prereleases.

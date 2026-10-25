@@ -4,11 +4,11 @@ slow-timeout = { period = "30s", terminate-after = 3 }
 
 # Run the install/use tests one at a time. They invoke `check_bins_in_use`,
 # which scans for running `forge`/`cast`/`anvil`/`chisel` processes globally, and
-# the `foundry_bins::` and `proxy::` tests also spawn those binaries themselves,
-# so they must not run concurrently.
+# the `foundry_bins::`, `proxy::`, `list_`, and `migrate_legacy_` tests also
+# spawn those binaries themselves, so they must not run concurrently.
 [test-groups]
 foundry-bins = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'test(/^foundry_bins::/) | test(/^proxy::/) | test(/^use_version_/)'
+filter = 'test(/^foundry_bins::/) | test(/^proxy::/) | test(/^use_version_/) | test(/^list_/) | test(/^migrate_legacy_/)'
 test-group = 'foundry-bins'

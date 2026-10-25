@@ -987,9 +987,10 @@ pub(crate) async fn use_version_resolved(
         version.to_string()
     };
 
-    let repo =
-        installed_repo(config, repo, &tag, !repo_explicit)?.unwrap_or_else(|| repo.to_string());
-    use_version(config, &repo, &tag)
+    if !repo_explicit && let Some(repo) = installed_repo(config, repo, &tag)? {
+        return use_version(config, &repo, &tag);
+    }
+    use_version(config, repo, &tag)
 }
 
 /// Resolves the installed toolchain `name` to its directory without network access.
@@ -1027,7 +1028,7 @@ pub(crate) fn installed_toolchain_dir(config: &Config, name: &str) -> Result<Pat
 
     let tag =
         if looks_like_version_number(name) { normalize_version(name).1 } else { name.to_string() };
-    let repo = installed_repo(config, repo, &tag, true)?.ok_or_else(|| {
+    let repo = installed_repo(config, repo, &tag)?.ok_or_else(|| {
         eyre::eyre!(
             "toolchain '{name}' is not installed; install it with `foundryup --install {name}`"
         )
@@ -1035,18 +1036,13 @@ pub(crate) fn installed_toolchain_dir(config: &Config, name: &str) -> Result<Pat
     Ok(config.version_dir(&repo, &tag))
 }
 
-/// Returns the repo that has `tag` installed: `repo` itself or, when `search_all` is set, the
-/// only installed repo that has it.
-fn installed_repo(
-    config: &Config,
-    repo: &str,
-    tag: &str,
-    search_all: bool,
-) -> Result<Option<String>> {
+/// Returns the repo that has `tag` installed: `repo` itself, or else the only installed repo that
+/// has it.
+fn installed_repo(config: &Config, repo: &str, tag: &str) -> Result<Option<String>> {
     if config.version_dir(repo, tag).is_dir() {
         return Ok(Some(repo.to_string()));
     }
-    if search_all { find_unique_repo_for_version(config, tag) } else { Ok(None) }
+    find_unique_repo_for_version(config, tag)
 }
 
 /// Finds the version directory named `version` across all installed repos,
@@ -1127,14 +1123,23 @@ fn activate(config: &Config, dir: &Path, label: &str) -> Result<()> {
     // Preflight all bins before mutating: prove each one exists and runs the same
     // semantic check activation relies on, so neither a missing nor a broken
     // binary can leave a mix of old and new binaries active.
-    for &Bin { optional, name: bin } in config.network.bins {
-        let src = dir.join(bin_name(bin));
-        if src.is_file() {
-            get_bin_version(&src).wrap_err_with(|| format!("failed to run {bin} in {label}"))?;
-        } else if !optional {
-            bail!("binary {bin} not found in {label} at {}", src.display());
-        }
-    }
+    let new_versions = config
+        .network
+        .bins
+        .iter()
+        .map(|&Bin { optional, name: bin }| {
+            let src = dir.join(bin_name(bin));
+            if src.is_file() {
+                get_bin_version(&src)
+                    .map(Some)
+                    .wrap_err_with(|| format!("failed to run {bin} in {label}"))
+            } else if optional {
+                Ok(None)
+            } else {
+                bail!("binary {bin} not found in {label} at {}", src.display())
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     fs::create_dir_all(&config.bin_dir)?;
 
@@ -1143,24 +1148,26 @@ fn activate(config: &Config, dir: &Path, label: &str) -> Result<()> {
         .network
         .bins
         .iter()
-        .map(|bin| {
-            let new = dir.join(bin_name(bin.name));
-            new.is_file().then(|| get_bin_version(&config.bin_path(bin.name)).ok()).flatten()
+        .zip(&new_versions)
+        .map(|(bin, new)| {
+            new.as_ref().and_then(|_| get_bin_version(&config.bin_path(bin.name)).ok())
         })
         .collect::<Vec<_>>();
 
     config.set_default_toolchain(dir)?;
 
     let proxy = std::env::current_exe()?;
-    for (&Bin { name: bin, .. }, old_version) in config.network.bins.iter().zip(old_versions) {
-        let dest = config.bin_path(bin);
-        if !dir.join(bin_name(bin)).is_file() {
+    for ((&Bin { name: bin, .. }, new), old) in
+        config.network.bins.iter().zip(new_versions).zip(old_versions)
+    {
+        let Some(new) = new else {
             clear_active_bin(config, bin)?;
             continue;
-        }
+        };
 
         // Keep proxies that are already in place: Windows cannot remove a hard link to the
         // running foundryup.
+        let dest = config.bin_path(bin);
         if !same_file::is_same_file(&proxy, &dest).unwrap_or(false) {
             clear_active_bin(config, bin)?;
             #[cfg(unix)]
@@ -1173,7 +1180,10 @@ fn activate(config: &Config, dir: &Path, label: &str) -> Result<()> {
 
         let v = get_bin_version(&dest)
             .wrap_err_with(|| format!("failed to run {bin} after activating {label}"))?;
-        match old_version {
+        if v != new {
+            bail!("{} runs `{v}` instead of `{new}` after activating {label}", dest.display());
+        }
+        match old {
             Some(old) if old != v => say!("use - {v} (from {old})"),
             _ => say!("use - {v}"),
         }
