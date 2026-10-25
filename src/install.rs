@@ -1117,9 +1117,10 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
 
     activate(config, &version_dir, &format!("version {version}"))?;
 
-    // `+nightly` selects the nightly with the newest mtime, which must include reactivations.
+    // `+nightly` selects the nightly with the newest mtime, which should include reactivations.
+    // Best effort: only the directory's owner may set it.
     if is_nightly_tag(version) {
-        filetime::set_file_mtime(&version_dir, filetime::FileTime::now())?;
+        let _ = filetime::set_file_mtime(&version_dir, filetime::FileTime::now());
     }
     Ok(())
 }

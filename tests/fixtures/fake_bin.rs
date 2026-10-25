@@ -13,7 +13,7 @@ fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args != ["-V"] {
         println!("args: {args:?}");
-        println!("FOUNDRYUP_TOOLCHAIN: {:?}", std::env::var("FOUNDRYUP_TOOLCHAIN").ok());
+        println!("FOUNDRYUP_TOOLCHAIN={}", std::env::var("FOUNDRYUP_TOOLCHAIN").unwrap_or_default());
     }
     if args.first().is_some_and(|arg| arg == "exit") {
         std::process::exit(args[1].parse().unwrap());

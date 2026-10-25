@@ -60,10 +60,8 @@ fn run(bin: &str) -> Result<Infallible> {
     let mut cmd = Command::new(&path);
     cmd.args(args);
     // Nested invocations, such as `cast` run by a `forge` script, use the same toolchain.
-    if name.is_some()
-        && let Some(version) = dir.file_name()
-    {
-        cmd.env(TOOLCHAIN_ENV, version);
+    if name.is_some() {
+        cmd.env(TOOLCHAIN_ENV, std::path::absolute(&dir)?);
     }
     exec(&mut cmd).wrap_err_with(|| format!("failed to run {}", path.display()))
 }

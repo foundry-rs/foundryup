@@ -29,7 +29,7 @@ fn runs_default_toolchain() {
         r#"
 forge v1.0.0
 args: ["build", "--sizes"]
-FOUNDRYUP_TOOLCHAIN: None
+FOUNDRYUP_TOOLCHAIN=
 
 "#
     ]]);
@@ -81,10 +81,35 @@ fn plus_selects_toolchain() {
         [r#"
 cast v2.0.0
 args: ["call", "+x"]
-FOUNDRYUP_TOOLCHAIN: Some("v2.0.0")
+FOUNDRYUP_TOOLCHAIN=[..]v2.0.0
 
 "#]
     ]);
+}
+
+// The toolchain a proxy exports selects the same toolchain in nested invocations.
+#[test]
+fn nested_invocations_use_same_toolchain() {
+    let (_temp_dir, foundry_dir) = setup(&[
+        "foundry-rs/foundry/v1.0.0",
+        "foundry-rs/foundry/v2.0.0",
+        "someone/foundry/someone-branch-x",
+    ]);
+
+    for toolchain in ["2.0.0", "someone-branch-x"] {
+        let output = proxy(&foundry_dir, "forge").arg(format!("+{toolchain}")).output().unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let exported =
+            stdout.lines().find_map(|line| line.strip_prefix("FOUNDRYUP_TOOLCHAIN=")).unwrap();
+        let expected = stdout.lines().next().unwrap().replace("forge", "cast");
+
+        proxy(&foundry_dir, "cast")
+            .env("FOUNDRYUP_TOOLCHAIN", exported)
+            .arg("-V")
+            .assert()
+            .success()
+            .stdout_eq(format!("{expected}\n"));
+    }
 }
 
 #[test]
@@ -96,7 +121,7 @@ fn env_selects_toolchain() {
         str![[r#"
 anvil v2.0.0
 args: []
-FOUNDRYUP_TOOLCHAIN: Some("v2.0.0")
+FOUNDRYUP_TOOLCHAIN=[..]v2.0.0
 
 "#]],
     );
@@ -110,7 +135,7 @@ FOUNDRYUP_TOOLCHAIN: Some("v2.0.0")
         .stdout_eq(str![[r#"
 anvil v1.0.0
 args: []
-FOUNDRYUP_TOOLCHAIN: Some("v1.0.0")
+FOUNDRYUP_TOOLCHAIN=[..]v1.0.0
 
 "#]]);
 
@@ -179,6 +204,13 @@ forge v1.0.0
 forge v2.0.0
 
 "#]]);
+    #[cfg(unix)]
+    for bin in BINS {
+        assert_eq!(
+            std::fs::read_link(foundry_dir.join("bin").join(bin)).unwrap(),
+            snapbox::cmd::cargo_bin!("foundryup")
+        );
+    }
 }
 
 // `stable` and `latest` select the highest installed release by semver, ignoring prereleases.
