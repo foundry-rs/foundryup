@@ -2,15 +2,13 @@ use smolgen::{Build, Emitter, Gitcl, Rustc};
 use std::env;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut emitter = Emitter::default();
-    emitter
+    let mut instructions = Vec::new();
+    Emitter::default()
         .default_on_error()
         .add_instructions(&Build::builder().build_timestamp(true).build())?
         .add_instructions(&Rustc::builder().semver(true).build())?
-        .add_instructions(&Gitcl::builder().sha(true).dirty(true).build())?;
-
-    let mut instructions = Vec::new();
-    emitter.emit_to(&mut instructions)?;
+        .add_instructions(&Gitcl::builder().sha(true).dirty(true).build())?
+        .emit_to(&mut instructions)?;
     // Tracking the git HEAD reruns this script, and rebuilds the crate, on every commit and
     // checkout. Debug builds skip it and keep the SHA from the last run of this script.
     // Release profiles keep tracking HEAD, so their version always matches the checkout.
