@@ -6,7 +6,8 @@ release channels.
 ## Usage
 
 ```bash
-curl -L https://raw.githubusercontent.com/foundry-rs/foundryup/HEAD/foundryup-init.sh | bash
+curl -L https://foundry.paradigm.xyz | bash
+# Restart your terminal, or run `source ~/.bashrc` / `source ~/.zshrc`.
 foundryup
 ```
 
