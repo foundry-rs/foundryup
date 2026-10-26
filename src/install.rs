@@ -590,9 +590,8 @@ fn verify_attestation_bundle(
         .wrap_err("attestation contains an invalid SHA-256 digest")?;
     let trusted_root = TrustedRoot::from_json(SIGSTORE_PRODUCTION_TRUSTED_ROOT)
         .wrap_err("failed to load the Sigstore public-good trust root")?;
-    let policy = VerificationPolicy::default()
-        .require_identity(release_workflow_identity(repo, tag))
-        .require_issuer(GITHUB_ACTIONS_ISSUER);
+    let policy =
+        VerificationPolicy::new(release_workflow_identity(repo, tag), GITHUB_ACTIONS_ISSUER);
 
     sigstore_verify::verify(digest, &bundle, &policy, &trusted_root)
         .wrap_err("Sigstore bundle verification failed")?;
@@ -1308,40 +1307,39 @@ fn nightly_release_tags_from_feed(feed: &str, repo: &str) -> Option<Vec<String>>
     loop {
         match reader.read_event() {
             Ok(Event::Start(event)) if !in_feed => {
-                if feed_closed || event.name() != QName(b"feed") {
+                if feed_closed || event.name() != QName("feed") {
                     return None;
                 }
                 in_feed = true;
             }
             Ok(Event::Empty(_)) if !in_feed => return None,
-            Ok(Event::Start(event)) if event.name() == QName(b"feed") => return None,
-            Ok(Event::Start(event)) if in_feed && event.name() == QName(b"entry") => {
+            Ok(Event::Start(event)) if event.name() == QName("feed") => return None,
+            Ok(Event::Start(event)) if in_feed && event.name() == QName("entry") => {
                 in_entry = true;
                 updated = None;
                 tag = None;
             }
-            Ok(Event::Start(event)) if in_entry && event.name() == QName(b"updated") => {
+            Ok(Event::Start(event)) if in_entry && event.name() == QName("updated") => {
                 updated = reader
-                    .read_text(QName(b"updated"))
+                    .read_text(QName("updated"))
                     .ok()
-                    .and_then(|value| value.decode().ok())
                     .and_then(|value| OffsetDateTime::parse(&value, &Rfc3339).ok());
             }
             Ok(Event::Empty(event)) | Ok(Event::Start(event))
-                if in_entry && event.name() == QName(b"link") =>
+                if in_entry && event.name() == QName("link") =>
             {
                 let mut is_alternate = false;
                 let mut href = None;
                 for attribute in event.attributes() {
                     let attribute = attribute.ok()?;
-                    if attribute.key == QName(b"rel") {
+                    if attribute.key == QName("rel") {
                         is_alternate = attribute
-                            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                            .normalized_value(XmlVersion::Implicit1_0)
                             .ok()
                             .is_some_and(|value| value == "alternate");
-                    } else if attribute.key == QName(b"href") {
+                    } else if attribute.key == QName("href") {
                         href = attribute
-                            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                            .normalized_value(XmlVersion::Implicit1_0)
                             .ok()
                             .map(|value| value.into_owned());
                     }
@@ -1353,13 +1351,13 @@ fn nightly_release_tags_from_feed(feed: &str, repo: &str) -> Option<Vec<String>>
                     tag = Some(candidate);
                 }
             }
-            Ok(Event::End(event)) if event.name() == QName(b"entry") => {
+            Ok(Event::End(event)) if event.name() == QName("entry") => {
                 if let (Some(updated), Some(tag)) = (updated.take(), tag.take()) {
                     candidates.push((updated, tag));
                 }
                 in_entry = false;
             }
-            Ok(Event::End(event)) if event.name() == QName(b"feed") => {
+            Ok(Event::End(event)) if event.name() == QName("feed") => {
                 in_feed = false;
                 feed_closed = true;
             }
