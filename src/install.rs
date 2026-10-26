@@ -120,7 +120,7 @@ async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> R
         warn!("--branch, --install, --use, and --repo arguments are ignored during local install");
     }
 
-    // Resolve to an absolute path so the symlinks below point at the build
+    // Resolve to an absolute path so the default toolchain points at the build
     // artifacts regardless of the current working directory.
     let local_path = fs::canonicalize(local_path)
         .wrap_err_with(|| format!("local repository not found: {}", local_path.display()))?;
@@ -130,22 +130,7 @@ async fn install_from_local(config: &Config, local_path: &Path, args: &Cli) -> R
 
     let built = build_bins(config, local_path, args).await?;
 
-    for &Bin { optional, name: bin } in config.network.bins {
-        let src = built_bin_path(&built, bin);
-        if src.is_file() {
-            let dest = config.bin_path(bin);
-            clear_active_bin(config, bin)?;
-
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(src, &dest)?;
-            #[cfg(windows)]
-            fs::copy(src, &dest)?;
-        } else if optional {
-            clear_active_bin(config, bin)?;
-        } else {
-            bail!("binary {bin} not found at {}", src.display());
-        }
-    }
+    activate(config, &built.build_dir, "the local build")?;
 
     say!("done");
     Ok(())
@@ -283,10 +268,6 @@ fn profile_target_dir(profile: &str) -> &str {
     if profile == "dev" { "debug" } else { profile }
 }
 
-fn built_bin_path(built: &BuiltBins, bin: &str) -> PathBuf {
-    built.build_dir.join(bin_name(bin))
-}
-
 fn clear_built_bins(config: &Config, build_dir: &Path) -> Result<()> {
     for &Bin { name: bin, .. } in config.network.bins {
         remove_if_exists(&build_dir.join(bin_name(bin)))?;
@@ -302,7 +283,7 @@ fn copy_built_bins_to_version_dir(
     clear_version_bins(config, version_dir)?;
 
     for &Bin { optional, name: bin } in config.network.bins {
-        let src = built_bin_path(built, bin);
+        let src = built.build_dir.join(bin_name(bin));
         if src.is_file() {
             let dest = version_dir.join(bin_name(bin));
             remove_if_exists(&dest)?;
@@ -337,6 +318,7 @@ async fn generate_manpages_from_source(config: &Config) -> Result<()> {
         let status = tokio::process::Command::new("help2man")
             .arg("-N")
             .arg(&bin_path)
+            .env_remove("FOUNDRYUP_TOOLCHAIN")
             .stdout(std::process::Stdio::from(man_file.into_parts().0))
             .status()
             .await
@@ -460,7 +442,7 @@ fn missing_attestation(tag: &str) -> Result<PrebuiltCheck> {
 }
 
 fn attestation_required(tag: &str) -> bool {
-    if tag == "nightly" || tag.starts_with("nightly-") {
+    if is_nightly_tag(tag) {
         return true;
     }
 
@@ -620,7 +602,7 @@ fn verify_nightly_source_commit(payload: &AttestationPayload, repo: &str, tag: &
 }
 
 fn release_workflow_identity(repo: &str, tag: &str) -> String {
-    let git_ref = if tag == "nightly" || tag.starts_with("nightly-") {
+    let git_ref = if is_nightly_tag(tag) {
         "refs/heads/master".to_string()
     } else {
         format!("refs/tags/{tag}")
@@ -1006,15 +988,62 @@ pub(crate) async fn use_version_resolved(
         version.to_string()
     };
 
-    if config.version_dir(repo, &tag).is_dir() {
-        return use_version(config, repo, &tag);
+    if !repo_explicit && let Some(repo) = installed_repo(config, repo, &tag)? {
+        return use_version(config, &repo, &tag);
     }
-
-    if !repo_explicit && let Some(found_repo) = find_unique_repo_for_version(config, &tag)? {
-        return use_version(config, &found_repo, &tag);
-    }
-
     use_version(config, repo, &tag)
+}
+
+/// Resolves the installed toolchain `name` to its directory without network access.
+///
+/// Names are looked up like `--use`, except that `stable` and `latest` select the newest
+/// installed release and `nightly` the most recently installed nightly.
+pub(crate) fn installed_toolchain_dir(config: &Config, name: &str) -> Result<PathBuf> {
+    let repo = config.network.repo;
+    let installed = || {
+        fs::read_dir(config.versions_dir.join(repo))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .filter_map(|entry| Some((entry.file_name().into_string().ok()?, entry.path())))
+    };
+    let channel = match name {
+        "stable" | "latest" => installed()
+            .filter_map(|(tag, dir)| {
+                let version = Version::parse(tag.strip_prefix('v')?).ok()?;
+                version.pre.is_empty().then_some((version, dir))
+            })
+            .max()
+            .map(|(_, dir)| dir),
+        "nightly" => installed()
+            .filter(|(tag, _)| is_nightly_tag(tag))
+            .filter_map(|(_, dir)| Some((fs::metadata(&dir).ok()?.modified().ok()?, dir)))
+            .max()
+            .map(|(_, dir)| dir),
+        _ => None,
+    };
+    if let Some(dir) = channel {
+        return Ok(dir);
+    }
+
+    let tag =
+        if looks_like_version_number(name) { normalize_version(name).1 } else { name.to_string() };
+    let repo = installed_repo(config, repo, &tag)?.ok_or_else(|| {
+        eyre::eyre!(
+            "toolchain '{name}' is not installed; install it with `foundryup --install {name}`"
+        )
+    })?;
+    Ok(config.version_dir(&repo, &tag))
+}
+
+/// Returns the repo that has `tag` installed: `repo` itself, or else the only installed repo that
+/// has it.
+fn installed_repo(config: &Config, repo: &str, tag: &str) -> Result<Option<String>> {
+    if config.version_dir(repo, tag).is_dir() {
+        return Ok(Some(repo.to_string()));
+    }
+    find_unique_repo_for_version(config, tag)
 }
 
 /// Finds the version directory named `version` across all installed repos,
@@ -1086,55 +1115,90 @@ pub(crate) fn use_version(config: &Config, repo: &str, version: &str) -> Result<
 
     crate::process::check_bins_in_use(config)?;
 
-    // Preflight all bins before mutating: prove each one exists and runs the same
-    // semantic check activation relies on, so neither a missing nor a broken
-    // binary can leave a mix of old and new binaries active.
-    for &Bin { optional, name: bin } in config.network.bins {
-        let src = version_dir.join(bin_name(bin));
-        if src.is_file() {
-            get_bin_version(&src)
-                .wrap_err_with(|| format!("failed to run {bin} in version {version}"))?;
-        } else if !optional {
-            bail!("binary {bin} not found in version {version} at {}", src.display());
-        }
+    activate(config, &version_dir, &format!("version {version}"))?;
+
+    // `+nightly` selects the nightly with the newest mtime, which should include reactivations.
+    // Best effort: only the directory's owner may set it.
+    if is_nightly_tag(version) {
+        let _ = filetime::set_file_mtime(&version_dir, filetime::FileTime::now());
     }
-
-    fs::create_dir_all(&config.bin_dir)?;
-
-    for &Bin { optional, name: bin } in config.network.bins {
-        let bin_name = bin_name(bin);
-        let src = version_dir.join(&bin_name);
-        if src.is_file() {
-            activate_bin(config, version, bin, &src)?;
-        } else if optional {
-            clear_active_bin(config, bin)?;
-        } else {
-            bail!("binary {bin} not found in version {version} at {}", src.display());
-        }
-    }
-
     Ok(())
 }
 
-fn activate_bin(config: &Config, version: &str, bin: &str, src: &Path) -> Result<()> {
-    let dest = config.bin_path(bin);
-    let old_version = if dest.exists() { get_bin_version(&dest).ok() } else { None };
+/// Makes the toolchain in `dir` the default and links a proxy into the bin dir for each of its
+/// binaries.
+fn activate(config: &Config, dir: &Path, label: &str) -> Result<()> {
+    // Preflight all bins before mutating: prove each one exists and runs the same
+    // semantic check activation relies on, so neither a missing nor a broken
+    // binary can leave a mix of old and new binaries active.
+    let new_versions = config
+        .network
+        .bins
+        .iter()
+        .map(|&Bin { optional, name: bin }| {
+            let src = dir.join(bin_name(bin));
+            if src.is_file() {
+                get_bin_version(&src)
+                    .map(Some)
+                    .wrap_err_with(|| format!("failed to run {bin} in {label}"))
+            } else if optional {
+                Ok(None)
+            } else {
+                bail!("binary {bin} not found in {label} at {}", src.display())
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-    clear_active_bin(config, bin)?;
+    fs::create_dir_all(&config.bin_dir)?;
 
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(src, &dest)?;
-    #[cfg(not(unix))]
-    fs::copy(src, &dest)?;
+    // Read before switching, while the proxies still run the previous default.
+    let old_versions = config
+        .network
+        .bins
+        .iter()
+        .zip(&new_versions)
+        .map(|(bin, new)| {
+            new.as_ref().and_then(|_| get_bin_version(&config.bin_path(bin.name)).ok())
+        })
+        .collect::<Vec<_>>();
 
-    let v = get_bin_version(&dest)
-        .wrap_err_with(|| format!("failed to run {bin} after activating version {version}"))?;
-    match old_version {
-        Some(old) if old != v => say!("use - {v} (from {old})"),
-        _ => say!("use - {v}"),
+    config.set_default_toolchain(dir)?;
+
+    let proxy = std::env::current_exe()?;
+    for ((&Bin { name: bin, .. }, new), old) in
+        config.network.bins.iter().zip(new_versions).zip(old_versions)
+    {
+        let Some(new) = new else {
+            clear_active_bin(config, bin)?;
+            continue;
+        };
+
+        // Keep proxies that are already in place: Windows cannot remove a hard link to the
+        // running foundryup.
+        let dest = config.bin_path(bin);
+        if !same_file::is_same_file(&proxy, &dest).unwrap_or(false) {
+            clear_active_bin(config, bin)?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&proxy, &dest)?;
+            #[cfg(not(unix))]
+            if fs::hard_link(&proxy, &dest).is_err() {
+                fs::copy(&proxy, &dest)?;
+            }
+        }
+
+        let v = get_bin_version(&dest)
+            .wrap_err_with(|| format!("failed to run {bin} after activating {label}"))?;
+        if v != new {
+            bail!("{} runs `{v}` instead of `{new}` after activating {label}", dest.display());
+        }
+        match old {
+            Some(old) if old != v => say!("use - {v} (from {old})"),
+            _ => say!("use - {v}"),
+        }
+
+        warn_if_shadowed(config, bin, &dest);
     }
 
-    warn_if_shadowed(config, bin, &dest);
     Ok(())
 }
 
@@ -1446,7 +1510,11 @@ fn normalize_version(version: &str) -> (String, String) {
     }
 }
 
-fn bin_name(name: &str) -> String {
+fn is_nightly_tag(tag: &str) -> bool {
+    tag == "nightly" || tag.starts_with("nightly-")
+}
+
+pub(crate) fn bin_name(name: &str) -> String {
     if cfg!(windows) { format!("{name}.exe") } else { name.to_string() }
 }
 
@@ -1497,7 +1565,9 @@ fn is_executable(path: &Path) -> bool {
 }
 
 fn get_bin_version(path: &Path) -> Result<String> {
-    let output = std::process::Command::new(path).arg("-V").output()?;
+    // Proxies in the bin dir must report the toolchain they run by default.
+    let output =
+        std::process::Command::new(path).arg("-V").env_remove("FOUNDRYUP_TOOLCHAIN").output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stderr = stderr.trim();
