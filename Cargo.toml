@@ -39,7 +39,7 @@ zip.opt-level = 3
 zlib-rs.opt-level = 3
 
 [build-dependencies]
-smolgen = { version = "0.1.1", features = ["build", "gitcl", "rustc"] }
+smolgen = { version = "0.1.2", features = ["build", "gitcl", "rustc"] }
 
 [dependencies]
 # async
@@ -88,7 +88,3 @@ color-eyre = "0.6.5"
 [dev-dependencies]
 snapbox = "1.2"
 tokio = { version = "1", features = ["test-util", "net"] }
-
-# TODO: use a smolgen release containing alloy-rs/smolgen#2 before merging.
-[patch.crates-io]
-smolgen = { git = "https://github.com/alloy-rs/smolgen", rev = "99abe6c759b5674db76d10ba2ea07fbb7490d57b" }
