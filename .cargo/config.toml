@@ -1,0 +1,4 @@
+[env]
+# Keeps build scripts from rerunning on every commit. Set VERGEN_IDEMPOTENT=0 to embed the real
+# build time and track git HEAD, as release builds do.
+VERGEN_IDEMPOTENT = "1"
