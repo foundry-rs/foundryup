@@ -140,3 +140,74 @@ jobs:
         with:
           files: artifacts/*
           generate_release_notes: true
+
+  # crates.io trusts this workflow file (release.yml) and the `release` environment, so keep both
+  # names. Prerelease tags such as v2.0.0-rc1 are not published.
+  verify:
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # secure-runner only: crates.io trusts only the release environment.
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@763efe11a9d8333bcbf0bb2f5ab80f21961c48fd # 2026-11-02T08-44-18Z-763efe11
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check the tagged commit is on master
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/master
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@763efe11a9d8333bcbf0bb2f5ab80f21961c48fd # 2026-11-02T08-44-18Z-763efe11
+        with:
+          toolchain: stable
+      - name: Check the tag matches the crate version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(cargo metadata --format-version 1 --no-deps --locked | jq -r '.packages[] | select(.name == "foundryup") | .version')"
+          if [[ "$TAG" != "v${version}" ]]; then
+            echo "error: foundryup is ${version}, but tag ${TAG} releases ${TAG#v}" >&2
+            exit 1
+          fi
+      - uses: tempoxyz/gh-actions/actions/cargo-publish@763efe11a9d8333bcbf0bb2f5ab80f21961c48fd # 2026-11-02T08-44-18Z-763efe11
+        with:
+          packages: foundryup
+          dry-run: true
+
+  # Publish after the GitHub release, so a failed binary build stops the release before the crate
+  # uploads.
+  publish:
+    needs:
+      - release
+      - verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@763efe11a9d8333bcbf0bb2f5ab80f21961c48fd # 2026-11-02T08-44-18Z-763efe11
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@763efe11a9d8333bcbf0bb2f5ab80f21961c48fd # 2026-11-02T08-44-18Z-763efe11
+        with:
+          toolchain: stable
+      - name: Check the tag still points at the verified commit
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          target="$(git ls-remote --tags origin | awk -v r="refs/tags/${TAG}" '$2 == r { t = $1 } $2 == r "^{}" { p = $1 } END { print (p != "" ? p : t) }')"
+          test "$target" = "$GITHUB_SHA"
+      - uses: tempoxyz/gh-actions/actions/cargo-publish@763efe11a9d8333bcbf0bb2f5ab80f21961c48fd # 2026-11-02T08-44-18Z-763efe11
+        with:
+          packages: foundryup
+          verify: false
