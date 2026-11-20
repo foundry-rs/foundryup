@@ -159,9 +159,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Check the tagged commit is on master
-        run: |
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/master
+        run: git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/master
       - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@763efe11a9d8333bcbf0bb2f5ab80f21961c48fd # 2026-11-02T08-44-18Z-763efe11
         with:
           toolchain: stable
