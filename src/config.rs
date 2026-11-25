@@ -1,7 +1,10 @@
 use crate::say;
 use eyre::Result;
 use fs_err as fs;
-use std::path::{Path, PathBuf};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -37,10 +40,14 @@ impl Config {
 
         let foundry_dir = env_path("FOUNDRY_DIR").unwrap_or_else(|| base_dir.join(".foundry"));
 
+        Ok(Self::with_foundry_dir(foundry_dir))
+    }
+
+    pub(crate) fn with_foundry_dir(foundry_dir: PathBuf) -> Self {
         let versions_dir = foundry_dir.join("versions");
         let bin_dir = foundry_dir.join("bin");
         let man_dir = foundry_dir.join("share/man/man1");
-        Ok(Self { foundry_dir, versions_dir, bin_dir, man_dir, network: NetworkConfig::FOUNDRY })
+        Self { foundry_dir, versions_dir, bin_dir, man_dir, network: NetworkConfig::FOUNDRY }
     }
 
     pub(crate) fn ensure_dirs(&self) -> Result<()> {
@@ -123,6 +130,40 @@ impl Config {
 
     pub(crate) fn repo_dir(&self, repo: &str) -> PathBuf {
         self.foundry_dir.join(repo)
+    }
+
+    pub(crate) fn default_toolchain_file(&self) -> PathBuf {
+        self.foundry_dir.join("default-toolchain")
+    }
+
+    /// Returns the directory of the toolchain that the bin dir proxies run by default.
+    pub(crate) fn default_toolchain(&self) -> Result<PathBuf> {
+        let dir = match fs::read_to_string(self.default_toolchain_file()) {
+            Ok(dir) => dir,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eyre::bail!("no default toolchain is set; run `foundryup` to install one")
+            }
+            Err(e) => return Err(e.into()),
+        };
+        Ok(self.versions_dir.join(dir.trim_end()))
+    }
+
+    /// Sets the default toolchain, recording `dir` relative to the versions dir when inside it.
+    pub(crate) fn set_default_toolchain(&self, dir: &Path) -> Result<()> {
+        let dir = dir.strip_prefix(&self.versions_dir).unwrap_or(dir);
+        let dir = dir
+            .to_str()
+            .ok_or_else(|| eyre::eyre!("toolchain path is not valid UTF-8: {}", dir.display()))?;
+        // Replace the file atomically so that a proxy starting meanwhile never reads it
+        // half-written.
+        let mut builder = tempfile::Builder::new();
+        // Temporary files are private by default, but the proxies may run as other users.
+        #[cfg(unix)]
+        builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o644));
+        let mut file = builder.tempfile_in(&self.foundry_dir)?;
+        file.write_all(dir.as_bytes())?;
+        file.persist(self.default_toolchain_file())?;
+        Ok(())
     }
 }
 

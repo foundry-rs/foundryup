@@ -18,6 +18,7 @@ mod download;
 mod install;
 mod platform;
 mod process;
+mod proxy;
 mod retry;
 mod self_update;
 
@@ -40,6 +41,10 @@ fn clear_empty_foundryup_env() {
 }
 
 fn main() -> Result<()> {
+    if let Some(bin) = proxy::invoked_as() {
+        proxy::main(bin);
+    }
+
     clear_empty_foundryup_env();
 
     color_eyre::install()?;
